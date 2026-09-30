@@ -1,0 +1,14 @@
+{
+  "name": "mdshare-deployment-test",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Deployment probe and pinned Trilium server bootstrap",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "start": "node server.mjs",
+    "test": "node --test",
+    "trilium:prepare": "node trilium.mjs prepare",
+    "trilium:check": "node trilium.mjs check",
+    "verify": "node verify.mjs"
+  }
+}
