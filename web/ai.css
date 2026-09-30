@@ -1,0 +1,24 @@
+#ai-panel { position: fixed; inset: 56px 0 0 auto; width: min(470px, 100%); z-index: 20; background: #fff; border-left: 1px solid #d6d9dd; display: flex; flex-direction: column; box-shadow: -8px 0 24px #0000000a; padding: 16px; box-sizing: border-box; }
+#ai-panel[hidden] { display: none; }
+#ai-panel > header { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
+#ai-panel > header strong { margin-right: auto; }
+#ai-context { padding: 12px 0; border-bottom: 1px solid #e6e8eb; }
+#ai-notes { max-height: 150px; overflow: auto; margin: 8px 0; }
+#ai-panel label { display: flex; gap: 8px; align-items: center; overflow-wrap: anywhere; }
+#ai-panel input[type=checkbox] { width: 16px; height: 16px; flex: 0 0 16px; margin: 5px 0; }
+#ai-history { flex: 1; min-height: 0; overflow: auto; }
+.ai-message { padding: 18px 0; border-bottom: 1px solid #e6e8eb; overflow-wrap: anywhere; }
+.ai-message > strong { font-size: 12px; color: #576d74; }
+.ai-message .markdown { padding: 8px 0; font-size: 14px; }
+.ai-message .markdown pre { max-width: 100%; overflow: auto; }
+.ai-message .markdown h1, .ai-message .markdown h2 { font-size: 20px; }
+.ai-message > button { font-size: 12px; margin: 6px 8px 0 0; }
+#ai-state { font-size: 12px; color: #52636d; overflow-wrap: anywhere; margin: 10px 0; }
+#ai-form { display: flex; gap: 8px; flex-shrink: 0; }
+#ai-question { width: 100%; min-width: 0; height: 84px; resize: vertical; }
+#ai-form > div { display: flex; flex-direction: column; gap: 8px; }
+#ai-note-dialog { width: min(640px, calc(100% - 32px)); }
+#ai-note-form label { display: block; margin: 12px 0; }
+#ai-note-form input, #ai-note-form select, #ai-note-form textarea { display: block; width: 100%; box-sizing: border-box; margin-top: 6px; }
+#ai-note-body { height: 260px; resize: vertical; }
+@media (max-width: 700px) { #ai-panel { inset: 0; width: 100%; } }

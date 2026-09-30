@@ -4,6 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { mkdir, readFile, writeFile, rename, statfs } from 'node:fs/promises';
+import { createNotes } from './notes.mjs';
 
 export const root = path.dirname(fileURLToPath(import.meta.url));
 
@@ -40,6 +41,7 @@ export async function createProbe({ dataDir = path.join(root, 'data'), token = p
   marker.lastStartedAt = new Date().toISOString();
   await writeFile(`${markerPath}.tmp`, JSON.stringify(marker, null, 2), { mode: 0o600 });
   await rename(`${markerPath}.tmp`, markerPath);
+  const notes = await createNotes({ dataDir, token });
   const started = Date.now();
   const server = http.createServer(async (request, response) => {
     const send = (status, body) => {
@@ -51,8 +53,20 @@ export async function createProbe({ dataDir = path.join(root, 'data'), token = p
       response.end(JSON.stringify(body, null, 2));
     };
     try {
-      const route = new URL(request.url, 'http://localhost').pathname;
+      const url = new URL(request.url, 'http://localhost');
+      if (await notes(request, response, url)) return;
+      const route = url.pathname;
       if (request.method !== 'GET') return send(405, { error: 'Method not allowed' });
+      const asset = route === '/' || /^\/s\/[a-f0-9]{64}$/.test(route) ? 'index.html' : route.slice(1);
+      if (/^(?:index\.html|[A-Za-z0-9_-][A-Za-z0-9_.-]*\.(?:js|css)|assets\/[A-Za-z0-9_.-]+\.(?:woff2?|ttf))$/.test(asset)) {
+        try {
+          const content = await readFile(path.join(root, 'public', asset));
+          const types = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.woff': 'font/woff', '.woff2': 'font/woff2', '.ttf': 'font/ttf' };
+          response.writeHead(200, { 'Content-Type': types[path.extname(asset)], 'Cache-Control': 'no-cache', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer', 'X-Frame-Options': 'DENY', 'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' https: http: data:; media-src 'self' https: http:; font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'" });
+          response.end(content);
+          return;
+        } catch (error) { if (error.code !== 'ENOENT') throw error; }
+      }
       if (route === '/api/health') {
         await readFile(markerPath);
         return send(200, { ok: true, service: 'mdshare-deployment-probe', triliumVerified: false });

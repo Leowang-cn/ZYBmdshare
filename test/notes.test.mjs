@@ -1,0 +1,97 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtemp, rm, readdir } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { once } from 'node:events';
+import { createProbe } from '../server.mjs';
+
+test('notes persist; batch is atomic; shares isolate subtrees and can be revoked', async () => {
+  const dataDir = await mkdtemp(path.join(os.tmpdir(), 'mdshare-notes-'));
+  const token = 'test-token-with-at-least-24-characters';
+  let server;
+  let base;
+  const start = async () => {
+    server = await createProbe({ dataDir, token });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    base = `http://127.0.0.1:${server.address().port}`;
+  };
+  const api = async (route, method = 'GET', value) => {
+    const response = await fetch(base + route, { method, headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: value === undefined ? undefined : JSON.stringify(value) });
+    return { status: response.status, body: await response.json() };
+  };
+  try {
+    await start();
+    const assets = await readdir(new URL('../public/', import.meta.url)).catch(error => { if (error.code === 'ENOENT') return []; throw error; });
+    for (const asset of assets.filter(name => name.endsWith('.js'))) assert.equal((await fetch(`${base}/${asset}`)).status, 200, asset);
+    assert.equal((await fetch(base + '/api/notes')).status, 401);
+    assert.equal((await fetch(base + '/api/ai/chat', { method: 'POST', body: '{}' })).status, 401);
+    const batch = await api('/api/notes/batch', 'POST', { notes: [{ key: 'parent', title: 'Parent', markdown: '# Parent' }, { title: 'Child', parentKey: 'parent', markdown: 'Child' }, { title: 'Private', markdown: 'secret' }] });
+    assert.equal(batch.status, 201);
+    const [parent, child, privateNote] = batch.body.notes;
+    assert.equal((await api('/api/notes/batch', 'POST', { notes: [{ title: 'Rollback', markdown: '' }, { title: '' }] })).status, 400);
+    assert.equal((await api('/api/notes')).body.notes.length, 3);
+    assert.equal((await api('/api/notes/batch', 'PUT', { notes: [{ ...child, title: 'Must roll back' }, { ...privateNote, revision: 0 }] })).status, 409);
+    assert.equal((await api(`/api/notes/${child.id}`)).body.title, 'Child');
+    assert.equal((await api('/api/notes/batch', 'PUT', { notes: [{ ...child, title: 'Updated child' }, { ...privateNote, title: 'Updated private' }] })).status, 200);
+    assert.equal((await api(`/api/notes/${child.id}`)).body.revision, 2);
+    assert.equal((await api(`/api/notes/${parent.id}`, 'PUT', { ...parent, parentId: child.id })).status, 400);
+    assert.equal((await api(`/api/notes/${parent.id}`, 'PUT', { ...parent, revision: 0 })).status, 409);
+    const shared = (await api('/api/shares', 'POST', { noteId: parent.id })).body;
+    const publicRoute = '/api/public/' + shared.url.split('/').pop();
+    assert.match(shared.pin, /^\d{4}$/);
+    assert.equal((await fetch(base + publicRoute)).status, 401);
+    const unlock = pin => fetch(base + publicRoute + '/unlock', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pin }) });
+    assert.equal((await unlock(shared.pin === '0000' ? '0001' : '0000')).status, 401);
+    let readerCookie = (await unlock(shared.pin)).headers.get('set-cookie').split(';')[0];
+    const read = route => fetch(base + route, { headers: { Cookie: readerCookie } });
+    const upload = async noteId => {
+      const response = await fetch(`${base}/api/notes/${noteId}/attachments?name=sample.mp4`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'video/mp4' }, body: Buffer.from('0123456789') });
+      assert.equal(response.status, 201);
+      return response.json();
+    };
+    const attachment = await upload(child.id);
+    const privateAttachment = await upload(privateNote.id);
+    const shareQuery = '?share=' + shared.url.split('/').pop();
+    assert.equal((await fetch(base + attachment.url)).status, 401);
+    assert.equal((await fetch(base + attachment.url + shareQuery)).status, 401);
+    assert.equal((await read(privateAttachment.url + shareQuery)).status, 404);
+    const range = await fetch(base + attachment.url + shareQuery, { headers: { Range: 'bytes=2-5', Cookie: readerCookie } });
+    assert.equal(range.status, 206);
+    assert.equal(await range.text(), '2345');
+    const publicNotes = await (await read(publicRoute)).json();
+    assert.deepEqual(publicNotes.notes.map(note => note.id), [parent.id, child.id]);
+    assert.equal((await fetch(base + publicRoute + '/' + privateNote.id)).status, 404);
+    assert.equal((await fetch(base + publicRoute, { method: 'POST' })).status, 405);
+    await new Promise(resolve => server.close(resolve));
+    await start();
+    assert.equal((await api('/api/notes')).body.notes.length, 3);
+    assert.equal((await read(publicRoute)).status, 401);
+    readerCookie = (await unlock(shared.pin)).headers.get('set-cookie').split(';')[0];
+    assert.equal((await read(publicRoute)).status, 200);
+    assert.equal((await api(`/api/shares/${shared.id}`, 'PUT', { pin: '0382' })).status, 200);
+    assert.equal((await read(publicRoute)).status, 401);
+    assert.equal((await read(attachment.url + shareQuery)).status, 401);
+    readerCookie = (await unlock('0382')).headers.get('set-cookie').split(';')[0];
+    assert.equal((await read(publicRoute)).status, 200);
+    assert.equal((await fetch(base + '/api/notes', { headers: { Cookie: readerCookie } })).status, 401);
+    assert.equal((await fetch(base + '/api/ai/chat', { method: 'POST', headers: { Cookie: readerCookie }, body: '{}' })).status, 401);
+    for (let attempt = 0; attempt < 10; attempt++) await unlock('9999');
+    assert.equal((await unlock('0382')).status, 429);
+    await api(`/api/shares/${shared.id}`, 'DELETE');
+    assert.equal((await fetch(base + publicRoute)).status, 404);
+    assert.equal((await fetch(base + attachment.url + shareQuery)).status, 404);
+    const login = await fetch(base + '/api/session', { method: 'POST', headers: { 'Content-Type': 'application/json', Origin: base }, body: JSON.stringify({ token }) });
+    assert.equal(login.status, 200);
+    const cookie = login.headers.get('set-cookie').split(';')[0];
+    assert.equal((await fetch(base + '/api/notes', { headers: { Cookie: cookie } })).status, 200);
+    assert.equal((await fetch(base + '/api/notes', { method: 'POST', headers: { Cookie: cookie, Origin: 'https://other.example' }, body: '{}' })).status, 403);
+    assert.equal((await fetch(base + '/api/ai/chat', { method: 'POST', headers: { Cookie: cookie, Origin: 'https://other.example' }, body: '{}' })).status, 403);
+    assert.equal((await api(`/api/notes/${parent.id}`, 'DELETE', { revision: parent.revision })).status, 200);
+    assert.deepEqual((await api('/api/notes')).body.notes.map(note => note.id), [privateNote.id]);
+  } finally {
+    if (server?.listening) await new Promise(resolve => server.close(resolve));
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
