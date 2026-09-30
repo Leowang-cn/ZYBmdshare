@@ -85,6 +85,17 @@ test('video duration limit is twenty minutes', () => {
   assert.equal(MAX_VIDEO_SECONDS, 20 * 60);
 });
 
+test('ASR ignores blank segments and invalid optional words without inventing timestamps', () => {
+  const segment = { start: 0.12, end: 2.34, text: '有效文字' };
+  const parsed = parseTranscription({ segments: [{ text: '  ' }, segment], words: [null, { start: -1, end: 1, word: '错误' }, { start: 0.12, end: 0.4, word: '有效' }] });
+  assert.deepEqual(parsed.segments, [segment]);
+  assert.deepEqual(parsed.words, [{ start: 0.12, end: 0.4, word: '有效' }]);
+  assert.throws(() => parseTranscription({ segments: [{ text: ' ' }] }), /有效分段/);
+  assert.throws(() => parseTranscription({ segments: [null] }), /segments\[0\]\.text/);
+  assert.throws(() => parseTranscription({ segments: [{ ...segment, start: '0.12' }] }), /segments\[0\]\.start/);
+  assert.throws(() => parseTranscription({ segments: [{ ...segment, end: -1 }] }), /segments\[0\]\.end/);
+});
+
 test('video URL extraction accepts thirty unique URLs per batch', () => {
   const urls = Array.from({ length: 31 }, (_, index) => `https://example.com/${index}.mp4`);
   assert.deepEqual(extractVideoUrls(urls.slice(0, 30).join('\n')), urls.slice(0, 30));

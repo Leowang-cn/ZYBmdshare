@@ -117,11 +117,19 @@ async function probe(file) {
 }
 export function parseTranscription(result) {
   if (!Array.isArray(result.segments) || !result.segments.length) throw new Error('ASR 未返回分段时间戳，请使用支持 verbose_json 的转写模型');
-  const validate = (items, field) => items.map(item => {
-    if (!Number.isFinite(item.start) || !Number.isFinite(item.end) || item.start < 0 || item.end < item.start || typeof item[field] !== 'string' || !item[field].trim()) throw new Error('ASR 返回的时间戳或文字无效');
-    return { start: item.start, end: item.end, [field]: item[field].trim() };
+  const validate = (items, field) => items.flatMap((item, index) => {
+    if (typeof item?.[field] === 'string' && !item[field].trim()) return [];
+    const invalid = !item || typeof item[field] !== 'string' ? field
+      : !Number.isFinite(item.start) || item.start < 0 ? 'start'
+      : !Number.isFinite(item.end) || item.end < item.start ? 'end' : null;
+    if (invalid) {
+      if (field === 'word') return [];
+      throw new Error(`ASR 分段时间戳或文字无效：segments[${index}].${invalid}（类型 ${typeof item?.[invalid]}）`);
+    }
+    return [{ start: item.start, end: item.end, [field]: item[field].trim() }];
   });
   const segments = validate(result.segments, 'text');
+  if (!segments.length) throw new Error('ASR 未返回包含文字的有效分段');
   const words = validate(Array.isArray(result.words) ? result.words : [], 'word');
   return { segments, words, text: segments.map(segment => segment.text).join('\n') };
 }
