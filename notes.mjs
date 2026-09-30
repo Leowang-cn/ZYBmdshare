@@ -2,6 +2,7 @@ import { randomBytes, randomUUID, randomInt, createHash, createHmac, timingSafeE
 import { mkdir, readFile, writeFile, rename, stat, unlink, open } from 'node:fs/promises';
 import { createReadStream } from 'node:fs';
 import path from 'node:path';
+import { ZipFile } from 'yazl';
 import { answerNotes } from './ai.mjs';
 import { checkUrl, extractVideoUrls, runVideoJob } from './video.mjs';
 
@@ -211,9 +212,38 @@ export async function createNotes({ dataDir, token }) {
           return true;
         }
         if (request.method !== 'GET') fail(405, 'Read-only share');
-        if (parts.length !== 4) fail(404, 'Not found');
+        const download = parts.length === 5 && parts[4] === 'download';
+        if (parts.length !== 4 && !download) fail(404, 'Not found');
         requireReader(request, share);
         const ids = subtree(state, share.noteId);
+        if (download) {
+          const safeName = value => value.replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').replace(/[. ]+$/g, '').slice(0, 60) || 'note';
+          const attachments = state.attachments.filter(item => ids.has(item.noteId));
+          const images = attachments.filter(item => item.type.startsWith('image/'));
+          for (const image of images) await stat(path.join(dataDir, 'attachments', image.id));
+          const imagePaths = new Map(images.map(image => [image.id, `images/${image.id}-${safeName(image.name)}`]));
+          const origin = `${request.socket.encrypted || process.env.COOKIE_SECURE === '1' ? 'https' : 'http'}://${request.headers.host}`;
+          const archive = new ZipFile();
+          archive.on('error', () => response.destroy());
+          archive.outputStream.on('error', () => response.destroy());
+          response.on('close', () => archive.outputStream.destroy());
+          for (const note of state.notes.filter(item => ids.has(item.id))) {
+            const markdown = note.markdown.replace(/(?<![\w:/.])\/api\/attachments\/([a-f0-9-]+)(?:\?[^\s)"'<>]*)?/g, (match, id) => {
+              if (imagePaths.has(id)) return imagePaths.get(id);
+              if (attachments.some(item => item.id === id)) return `${origin}/api/attachments/${id}?share=${parts[3]}`;
+              return match;
+            });
+            archive.addBuffer(Buffer.from(markdown), `${safeName(note.title)}-${note.id}.md`);
+          }
+          for (const image of images) archive.addFile(path.join(dataDir, 'attachments', image.id), imagePaths.get(image.id));
+          response.writeHead(200, {
+            'Content-Type': 'application/zip', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff',
+            'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent(safeName(getNote(state, share.noteId).title)).replace(/'/g, '%27')}.zip`
+          });
+          archive.outputStream.pipe(response);
+          archive.end();
+          return true;
+        }
         send(200, { rootId: share.noteId, notes: state.notes.filter(note => ids.has(note.id)).map(note => ({ ...note, parentId: note.id === share.noteId ? null : note.parentId })) });
         return true;
       }

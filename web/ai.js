@@ -6,7 +6,7 @@ export function setupAI({ element, api, notify, getNotes, getSelected, isDirty, 
   document.querySelector('.actions').insertAdjacentHTML('afterbegin', '<button id="ai-open" title="AI 问答" aria-label="AI 问答"><i data-lucide="message-circle"></i></button>');
   element('workspace').insertAdjacentHTML('beforeend', `<section id="ai-panel" hidden aria-label="AI 问答">
     <header><strong>AI 问答</strong><button id="ai-reset" title="新建对话" aria-label="新建对话"><i data-lucide="plus"></i></button><button id="ai-close" title="关闭问答" aria-label="关闭问答"><i data-lucide="x"></i></button></header>
-    <details id="ai-context" open><summary>参考笔记 <span id="ai-count"></span></summary><div id="ai-notes"></div><label><input id="ai-images" type="checkbox" checked>包含本地图片</label></details>
+    <details id="ai-context" open><summary><i data-lucide="chevron-right"></i><span>参考笔记</span><span id="ai-count"></span></summary><div id="ai-notes" aria-label="参考笔记列表"></div><label><input id="ai-images" type="checkbox" checked>包含本地图片</label></details>
     <div id="ai-history" aria-label="对话记录"></div><p id="ai-state" role="status">尚未开始对话</p>
     <form id="ai-form"><textarea id="ai-question" aria-label="问题" placeholder="向所选笔记提问" maxlength="8000" required></textarea><div><button id="ai-stop" type="button" hidden title="停止" aria-label="停止"><i data-lucide="square"></i></button><button id="ai-send" type="submit" title="发送问题" aria-label="发送问题"><i data-lucide="arrow-up"></i></button></div></form>
   </section>`);
@@ -20,12 +20,28 @@ export function setupAI({ element, api, notify, getNotes, getSelected, isDirty, 
   const lock = value => { for (const input of element('ai-context').querySelectorAll('input')) input.disabled = value; };
   const populate = () => {
     element('ai-notes').replaceChildren();
-    for (const note of getNotes()) {
+    const notes = getNotes();
+    const ids = new Set(notes.map(note => note.id));
+    const visited = new Set();
+    const root = document.createElement('ul');
+    const appendNote = (note, container) => {
+      if (visited.has(note.id)) return;
+      visited.add(note.id);
+      const item = document.createElement('li');
       const label = document.createElement('label'); const checkbox = document.createElement('input');
+      const title = document.createElement('span'); title.textContent = note.title; title.title = note.title;
       checkbox.type = 'checkbox'; checkbox.value = note.id; checkbox.checked = note.id === getSelected()?.id;
       checkbox.onchange = () => { element('ai-count').textContent = `(${chosen().length}/10)`; };
-      label.append(checkbox, document.createTextNode(note.title)); element('ai-notes').append(label);
-    }
+      label.append(checkbox, title); item.append(label); container.append(item);
+      const children = notes.filter(child => child.parentId === note.id && !visited.has(child.id));
+      if (children.length) {
+        const list = document.createElement('ul'); item.append(list);
+        for (const child of children) appendNote(child, list);
+      }
+    };
+    for (const note of notes.filter(note => !ids.has(note.parentId))) appendNote(note, root);
+    for (const note of notes) if (!visited.has(note.id)) appendNote(note, root);
+    element('ai-notes').append(root);
     element('ai-count').textContent = `(${chosen().length}/10)`;
   };
   element('ai-open').onclick = () => { element('ai-panel').hidden = false; if (!locked && !controller) populate(); };

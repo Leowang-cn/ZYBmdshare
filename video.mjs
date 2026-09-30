@@ -109,9 +109,23 @@ async function probe(file) {
 async function transcribe(audio, filename) {
   const base = process.env.ASR_BASE_URL;
   const key = process.env.ASR_API_KEY || process.env.AI_API_KEY;
-  if (!base || !key) throw new Error('未配置 ASR_BASE_URL 和 ASR_API_KEY');
+  if (!base || !key) throw new Error('未配置 ASR_BASE_URL 或转写密钥（ASR_API_KEY / AI_API_KEY）');
+  if ((process.env.ASR_MODEL || '').startsWith('qwen3-asr-flash')) {
+    const audioBytes = await (await import('node:fs/promises')).readFile(audio);
+    const response = await fetch(`${base.replace(/\/$/, '')}/chat/completions`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: process.env.ASR_MODEL, messages: [{ role: 'user', content: [{ type: 'input_audio', input_audio: { data: `data:audio/mp3;base64,${audioBytes.toString('base64')}` } }] }], stream: false, asr_options: { enable_itn: false } }),
+      signal: AbortSignal.timeout(10 * 60 * 1000)
+    });
+    if (!response.ok) throw new Error(`ASR 失败（HTTP ${response.status}）`);
+    const result = await response.json();
+    const text = result.choices?.[0]?.message?.content;
+    if (typeof text !== 'string') throw new Error('ASR 返回格式无效');
+    return text.trim() ? `（当前转写模型未提供时间戳）\n\n${text.trim()}` : '';
+  }
   const form = new FormData();
-  form.set('file', new File([await (await import('node:fs/promises')).readFile(audio)], filename, { type: 'audio/wav' }));
+  form.set('file', new File([await (await import('node:fs/promises')).readFile(audio)], filename, { type: 'audio/mpeg' }));
   form.set('model', process.env.ASR_MODEL || 'whisper-1');
   form.set('response_format', 'verbose_json');
   const response = await fetch(`${base.replace(/\/$/, '')}/audio/transcriptions`, { method: 'POST', headers: { Authorization: `Bearer ${key}` }, body: form, signal: AbortSignal.timeout(10 * 60 * 1000) });
@@ -122,21 +136,23 @@ async function transcribe(audio, filename) {
 }
 const formatTime = seconds => new Date(Math.max(0, Number(seconds) || 0) * 1000).toISOString().slice(11, 19);
 async function summarize(transcript, duration) {
+  if (transcript.startsWith('（当前转写模型未提供时间戳）')) transcript = `此逐字稿没有时间信息，无法可靠定位关键帧。请返回空 keyframes 数组，不要猜测内容出现的时间。\n${transcript}`;
   const base = process.env.SUMMARY_BASE_URL || process.env.AI_BASE_URL;
   const key = process.env.SUMMARY_API_KEY || process.env.AI_API_KEY;
   if (!base || !key) throw new Error('未配置总结模型服务');
-  const response = await fetch(`${base.replace(/\/$/, '')}/chat/completions`, { method: 'POST', headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ model: process.env.SUMMARY_MODEL || process.env.AI_MODEL, temperature: 0.2, response_format: { type: 'json_object' }, messages: [{ role: 'system', content: '你是视频内容分析器。只返回 JSON：{"summary":"中文核心总结","keyframes":[{"time":秒数,"reason":"截图理由"}]}。最多返回 6 个关键帧，时间必须在视频时长内。' }, { role: 'user', content: `视频时长 ${duration.toFixed(1)} 秒。以下是带时间戳的逐字稿：\n${transcript.slice(0, 100000)}` }] }), signal: AbortSignal.timeout(5 * 60 * 1000) });
+  const response = await fetch(`${base.replace(/\/$/, '')}/chat/completions`, { method: 'POST', headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ model: process.env.SUMMARY_MODEL || process.env.AI_MODEL, temperature: 0.2, response_format: { type: 'json_object' }, messages: [{ role: 'system', content: '你是视频内容分析器。只返回 JSON：{"summary":"中文核心总结","keyframes":[{"time":秒数,"reason":"截图理由","description":"对应时间段的中文内容描述"}]}。最多返回 6 个关键帧，按时间顺序排列，时间必须在视频时长内。description 将与该时间的截图配对组成图文描述，应依据逐字稿讲述该段内容，而不是仅解释截图理由。你没有看到视频画面，不要编造视觉细节。' }, { role: 'user', content: `视频时长 ${duration.toFixed(1)} 秒。以下是带时间戳的逐字稿：\n${transcript.slice(0, 100000)}` }] }), signal: AbortSignal.timeout(5 * 60 * 1000) });
   const body = await response.text();
   if (!response.ok) throw new Error(`视频总结失败（HTTP ${response.status}）`);
   const content = JSON.parse(body).choices?.[0]?.message?.content || '{}';
   const result = JSON.parse(content);
-  return { summary: String(result.summary || ''), keyframes: Array.isArray(result.keyframes) ? result.keyframes.filter(item => Number.isFinite(Number(item.time)) && Number(item.time) >= 0 && Number(item.time) <= duration).slice(0, 6) : [] };
+  return { summary: String(result.summary || ''), keyframes: Array.isArray(result.keyframes) ? result.keyframes.filter(item => Number.isFinite(Number(item.time)) && Number(item.time) >= 0 && Number(item.time) <= duration).sort((left, right) => Number(left.time) - Number(right.time)).slice(0, 6) : [] };
 }
 export async function runVideoJob(job, { dataDir, saveAttachment, update }) {
   const work = path.join(dataDir, 'video-jobs', job.id);
   await mkdir(work, { recursive: true, mode: 0o700 });
   const source = path.join(work, 'source');
   const audio = path.join(work, 'audio.wav');
+  const transcriptionAudio = path.join(work, 'transcription.mp3');
   try {
     await update({ status: 'downloading', progress: 10 });
     const downloaded = await download(job.url, source);
@@ -144,7 +160,21 @@ export async function runVideoJob(job, { dataDir, saveAttachment, update }) {
     const metadata = await probe(source);
     await update({ status: 'transcribing', progress: 40, duration: metadata.duration });
     await command(process.env.FFMPEG_BIN || 'ffmpeg', ['-y', '-protocol_whitelist', 'file', '-threads', '2', '-i', source, '-vn', '-ac', '1', '-ar', '16000', '-c:a', 'pcm_s16le', audio]);
-    const transcript = await transcribe(audio, 'audio.wav');
+    await command(process.env.FFMPEG_BIN || 'ffmpeg', ['-y', '-protocol_whitelist', 'file', '-threads', '2', '-i', audio, '-c:a', 'libmp3lame', '-b:a', '64k', transcriptionAudio]);
+    let transcript;
+    if ((process.env.ASR_MODEL || '').startsWith('qwen3-asr-flash')) {
+      const parts = [];
+      for (let start = 0; start < metadata.duration; start += 60) {
+        const chunk = path.join(work, `transcription-${start}.mp3`);
+        await command(process.env.FFMPEG_BIN || 'ffmpeg', ['-y', '-protocol_whitelist', 'file', '-threads', '2', '-ss', String(start), '-i', audio, '-t', String(Math.min(60, metadata.duration - start)), '-c:a', 'libmp3lame', '-b:a', '64k', chunk]);
+        const text = (await transcribe(chunk, 'audio.mp3')).replace(/^（当前转写模型未提供时间戳）\n\n/, '');
+        parts.push(`[${formatTime(start)}-${formatTime(Math.min(start + 60, metadata.duration))}] ${text || '（ASR 未返回文字）'}`);
+        await update({ status: 'transcribing', progress: 40 + Math.floor(19 * Math.min(start + 60, metadata.duration) / metadata.duration) });
+      }
+      transcript = `（以下时间为音频切片范围，不是逐句时间戳）\n\n${parts.join('\n\n')}`;
+    } else {
+      transcript = await transcribe(transcriptionAudio, 'audio.mp3');
+    }
     await update({ status: 'summarizing', progress: 60 });
     const analysis = await summarize(transcript, metadata.duration);
     await update({ status: 'capturing', progress: 75 });
@@ -153,14 +183,15 @@ export async function runVideoJob(job, { dataDir, saveAttachment, update }) {
       const item = analysis.keyframes[index];
       const image = path.join(work, `keyframe-${index + 1}.jpg`);
       await command(process.env.FFMPEG_BIN || 'ffmpeg', ['-y', '-protocol_whitelist', 'file', '-threads', '2', '-ss', String(Math.min(Number(item.time), metadata.duration - 0.1)), '-i', source, '-frames:v', '1', '-vf', 'scale=1280:-2', '-q:v', '3', image]);
-      screenshots.push({ path: image, name: `关键帧-${index + 1}.jpg`, reason: item.reason || '' });
+      screenshots.push({ path: image, name: `关键帧-${index + 1}.jpg`, time: item.time, description: String(item.description || item.reason || '') });
     }
     await update({ status: 'saving', progress: 90 });
     const video = await saveAttachment({ path: source, name: 'video', type: metadata.format.includes('webm') ? 'video/webm' : 'video/mp4' });
     const audioAttachment = await saveAttachment({ path: audio, name: '音频.wav', type: 'audio/wav' });
     const imageAttachments = [];
-    for (const screenshot of screenshots) imageAttachments.push({ ...await saveAttachment({ path: screenshot.path, name: screenshot.name, type: 'image/jpeg' }), reason: screenshot.reason });
-    const markdown = [`原视频：<video controls src="${video.url}"></video>`, '', `## 核心总结\n${analysis.summary}`, '', '## 带时间戳逐字稿', transcript || '（ASR 未返回文字）', '', `## 音频\n[audio](${audioAttachment.url})`, '', '## 关键帧', ...imageAttachments.map((item, index) => `### ${index + 1}. ${item.reason}\n![关键帧](${item.url})`)].join('\n');
+    for (const screenshot of screenshots) imageAttachments.push({ ...await saveAttachment({ path: screenshot.path, name: screenshot.name, type: 'image/jpeg' }), time: screenshot.time, description: screenshot.description });
+    const illustrated = imageAttachments.length ? imageAttachments.map(item => `### ${formatTime(item.time)}\n\n${item.description}\n\n![关键帧](${item.url})`).join('\n\n') : '（暂无图文描述）';
+    const markdown = ['## 原视频：', `<video controls src="${video.url}"></video>`, '## 核心总结：', analysis.summary, '## 图文描述：', illustrated, '## 带时间戳逐字稿：', transcript || '（ASR 未返回文字）', '## 音频：', `[audio](${audioAttachment.url})`].join('\n\n');
     await update({ status: 'completed', progress: 100, markdown, attachments: [video, audioAttachment, ...imageAttachments] });
   } catch (error) {
     await update({ status: 'failed', progress: 100, error: error instanceof Error ? error.message : '视频任务失败' });

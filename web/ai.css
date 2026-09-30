@@ -2,8 +2,17 @@
 #ai-panel[hidden] { display: none; }
 #ai-panel > header { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
 #ai-panel > header strong { margin-right: auto; }
-#ai-context { padding: 12px 0; border-bottom: 1px solid #e6e8eb; }
-#ai-notes { max-height: 150px; overflow: auto; margin: 8px 0; }
+#ai-context { padding: 12px 0; border-bottom: 1px solid #e6e8eb; flex-shrink: 0; min-width: 0; }
+#ai-context > summary { width: 100%; height: auto; min-height: 36px; padding: 6px 0; gap: 8px; white-space: nowrap; }
+#ai-context[open] > summary svg { transform: rotate(90deg); }
+#ai-count { margin-left: auto; color: #888; font-size: 13px; }
+#ai-notes { max-height: min(240px, 32dvh); overflow: auto; margin: 8px 0; }
+#ai-notes ul { list-style: none; margin: 0; padding: 0; }
+#ai-notes ul ul { margin-left: 8px; padding-left: 16px; border-left: 1px solid #e6e8eb; }
+#ai-notes label { min-height: 36px; padding: 5px 6px; align-items: flex-start; cursor: pointer; border-radius: 4px; }
+#ai-notes label:hover { background: #f5f5f5; }
+#ai-notes label:has(input:checked) { background: #eef2f5; }
+#ai-notes label span { min-width: 0; line-height: 26px; }
 #ai-panel label { display: flex; gap: 8px; align-items: center; overflow-wrap: anywhere; }
 #ai-panel input[type=checkbox] { width: 16px; height: 16px; flex: 0 0 16px; margin: 5px 0; }
 #ai-history { flex: 1; min-height: 0; overflow: auto; }

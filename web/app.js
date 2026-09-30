@@ -188,6 +188,19 @@ if (!shareToken) setupAI({ element, api, notify, icons, getNotes: () => notes, g
 if (!shareToken) setupVideo({ api, notify, icons, getSelected: () => selected, getMarkdown: () => element('editor').value, refresh: async id => { if (busy || dirty) throw new Error('请先保存当前笔记'); await load(id); } });
 if (shareToken) {
   document.body.classList.add('shared'); element('title').readOnly = true;
+  const download = document.createElement('button');
+  download.id = 'download-share'; download.title = '下载 ZIP'; download.setAttribute('aria-label', '下载 ZIP');
+  download.innerHTML = '<i data-lucide="download"></i>';
+  element('breadcrumb').after(download); icons();
+  action('download-share', async () => {
+    download.disabled = true;
+    try {
+      await api(`/api/public/${shareToken}`);
+      const anchor = document.createElement('a');
+      anchor.href = `/api/public/${shareToken}/download`; anchor.download = '';
+      document.body.append(anchor); anchor.click(); anchor.remove();
+    } finally { download.disabled = false; }
+  });
   for (const id of ['new-root', 'backup', 'logout', 'empty-create', 'parent-label']) element(id).hidden = true;
 }
 load().catch(error => { if (shareToken && error.status !== 401) { element('pin-login').hidden = true; element('workspace').hidden = false; element('empty').querySelector('h1').textContent = '分享不存在或已撤销'; } else if (!shareToken && !element('login').hidden) element('login-error').textContent = ''; else if (error.status !== 401) notify(error.message); });

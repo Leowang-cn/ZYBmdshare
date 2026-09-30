@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { once } from 'node:events';
 import { createProbe } from '../server.mjs';
+import { unzipSync, strFromU8 } from 'fflate';
 
 test('notes persist; batch is atomic; shares isolate subtrees and can be revoked', async () => {
   const dataDir = await mkdtemp(path.join(os.tmpdir(), 'mdshare-notes-'));
@@ -42,6 +43,7 @@ test('notes persist; batch is atomic; shares isolate subtrees and can be revoked
     const publicRoute = '/api/public/' + shared.url.split('/').pop();
     assert.match(shared.pin, /^\d{4}$/);
     assert.equal((await fetch(base + publicRoute)).status, 401);
+    assert.equal((await fetch(base + publicRoute + '/download')).status, 401);
     const unlock = pin => fetch(base + publicRoute + '/unlock', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pin }) });
     assert.equal((await unlock(shared.pin === '0000' ? '0001' : '0000')).status, 401);
     let readerCookie = (await unlock(shared.pin)).headers.get('set-cookie').split(';')[0];
@@ -53,6 +55,21 @@ test('notes persist; batch is atomic; shares isolate subtrees and can be revoked
     };
     const attachment = await upload(child.id);
     const privateAttachment = await upload(privateNote.id);
+    const imageResponse = await fetch(`${base}/api/notes/${child.id}/attachments?name=picture.png`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'image/png' }, body: Buffer.from('image-content') });
+    const image = await imageResponse.json();
+    const currentChild = (await api(`/api/notes/${child.id}`)).body;
+    assert.equal((await api(`/api/notes/${child.id}`, 'PUT', { ...currentChild, markdown: `![图片](${image.url})\n<video controls src="${attachment.url}"></video>\n<audio src="https://example.com/audio.mp3"></audio>` })).status, 200);
+    const zipResponse = await read(publicRoute + '/download');
+    assert.equal(zipResponse.status, 200);
+    assert.equal(zipResponse.headers.get('content-type'), 'application/zip');
+    const files = unzipSync(new Uint8Array(await zipResponse.arrayBuffer()));
+    assert.equal(Object.keys(files).length, 3);
+    assert.equal(strFromU8(files[`images/${image.id}-picture.png`]), 'image-content');
+    const exported = strFromU8(files[`Updated child-${child.id}.md`]);
+    assert.ok(exported.includes(`images/${image.id}-picture.png`));
+    assert.ok(exported.includes(`${base}${attachment.url}?share=${shared.url.split('/').pop()}`));
+    assert.ok(exported.includes('https://example.com/audio.mp3'));
+    assert.ok(!Object.keys(files).some(name => name.includes(privateNote.id) || name.endsWith('.mp4')));
     const shareQuery = '?share=' + shared.url.split('/').pop();
     assert.equal((await fetch(base + attachment.url)).status, 401);
     assert.equal((await fetch(base + attachment.url + shareQuery)).status, 401);
@@ -73,6 +90,7 @@ test('notes persist; batch is atomic; shares isolate subtrees and can be revoked
     assert.equal((await api(`/api/shares/${shared.id}`, 'PUT', { pin: '0382' })).status, 200);
     assert.equal((await read(publicRoute)).status, 401);
     assert.equal((await read(attachment.url + shareQuery)).status, 401);
+    assert.equal((await read(publicRoute + '/download')).status, 401);
     readerCookie = (await unlock('0382')).headers.get('set-cookie').split(';')[0];
     assert.equal((await read(publicRoute)).status, 200);
     assert.equal((await fetch(base + '/api/notes', { headers: { Cookie: readerCookie } })).status, 401);
@@ -81,6 +99,7 @@ test('notes persist; batch is atomic; shares isolate subtrees and can be revoked
     assert.equal((await unlock('0382')).status, 429);
     await api(`/api/shares/${shared.id}`, 'DELETE');
     assert.equal((await fetch(base + publicRoute)).status, 404);
+    assert.equal((await read(publicRoute + '/download')).status, 404);
     assert.equal((await fetch(base + attachment.url + shareQuery)).status, 404);
     const login = await fetch(base + '/api/session', { method: 'POST', headers: { 'Content-Type': 'application/json', Origin: base }, body: JSON.stringify({ token }) });
     assert.equal(login.status, 200);
