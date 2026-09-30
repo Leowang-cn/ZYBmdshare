@@ -4,6 +4,7 @@ import katex from 'katex';
 import { createIcons, Plus, Download, LogOut, FilePlus, Paperclip, Share2, Trash2, Save, NotebookPen, X, PanelLeft, Ellipsis, MessageCircle, ArrowUp, Square, Copy, Video, RefreshCw } from 'lucide';
 import { setupAI } from './ai.js';
 import { setupVideo } from './video.js';
+import { enhanceMindmaps } from './mindmap.js';
 import 'katex/dist/katex.min.css';
 import './minimal.css';
 
@@ -13,6 +14,7 @@ let notes = [];
 let selected = null;
 let dirty = false;
 let rendering = 0;
+let cleanupMindmaps = () => {};
 let timer;
 let busy = false;
 const icons = () => createIcons({ icons: { Plus, Download, LogOut, FilePlus, Paperclip, Share2, Trash2, Save, NotebookPen, X, PanelLeft, Ellipsis, MessageCircle, ArrowUp, Square, Copy, Video, RefreshCw } });
@@ -31,6 +33,7 @@ marked.use({ extensions: [
 ] });
 async function render() {
   const generation = ++rendering;
+  cleanupMindmaps();
   const preview = element('preview');
   preview.innerHTML = DOMPurify.sanitize(marked.parse(element('editor').value), { ADD_TAGS: ['video', 'audio', 'source'], ADD_ATTR: ['controls', 'preload'], FORBID_TAGS: ['style', 'iframe', 'form', 'input', 'button'], FORBID_ATTR: ['srcset'] });
   for (const media of preview.querySelectorAll('[src],a[href]')) {
@@ -45,6 +48,7 @@ async function render() {
       if (media.tagName === 'A') { media.rel = 'noopener noreferrer'; media.target = '_blank'; }
     } catch { media.removeAttribute(attribute); }
   }
+  cleanupMindmaps = enhanceMindmaps(preview);
   const diagrams = [...preview.querySelectorAll('code.language-mermaid')];
   if (!diagrams.length) return;
   try {

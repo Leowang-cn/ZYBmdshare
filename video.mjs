@@ -154,11 +154,12 @@ export async function transcribe(audio, filename) {
 const formatTime = seconds => new Date(Math.max(0, Number(seconds) || 0) * 1000).toISOString().slice(11, 19);
 export const formatTranscript = transcription => transcription.segments.map(segment => `[${new Date(segment.start * 1000).toISOString().slice(11, 23)}-${new Date(segment.end * 1000).toISOString().slice(11, 23)}] ${segment.text}`).join('\n\n');
 async function summarize(transcript, duration) {
+  transcript = `输出要求：每个末节点除截图 time 外，还必须返回数字 start 和 end，表示该要点对应内容的起止秒数，依据下方真实逐字稿，满足 0 <= start <= time <= end <= 视频时长，且 start < end。不要为凑节点数量拆分内容。\n${transcript}`;
   if (transcript.startsWith('（当前转写模型未提供时间戳）')) transcript = `此逐字稿没有时间信息，无法可靠定位关键帧。请返回空 keyframes 数组，不要猜测内容出现的时间。\n${transcript}`;
   const base = process.env.SUMMARY_BASE_URL || process.env.AI_BASE_URL;
   const key = process.env.SUMMARY_API_KEY || process.env.AI_API_KEY;
   if (!base || !key) throw new Error('未配置总结模型服务');
-  const response = await fetch(`${base.replace(/\/$/, '')}/chat/completions`, { method: 'POST', headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ model: process.env.SUMMARY_MODEL || process.env.AI_MODEL, temperature: 0.2, response_format: { type: 'json_object' }, messages: [{ role: 'system', content: '你是视频内容分析器。只返回 JSON：{"summary":"中文核心总结","mindmap":{"label":"视频主题","children":[{"label":"主题分支","children":[{"label":"具体内容要点","time":12.34}]}]}}。根据逐字稿组织视频内容的思维导图，最多5层、30个节点、12个末节点。每个末节点必须提供对应内容在原视频中的 time 秒数，依据真实逐字稿时间，范围为0到视频时长（不含末端）。每个末节点会内嵌该时间截取的关键帧图片。非末节点使用 children，末节点使用 time。你没有看到视频画面，不要编造视觉细节。' }, { role: 'user', content: `视频时长 ${duration.toFixed(1)} 秒。以下是带时间戳的逐字稿：\n${transcript.slice(0, 100000)}` }] }), signal: AbortSignal.timeout(5 * 60 * 1000) });
+  const response = await fetch(`${base.replace(/\/$/, '')}/chat/completions`, { method: 'POST', headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ model: process.env.SUMMARY_MODEL || process.env.AI_MODEL, temperature: 0.2, response_format: { type: 'json_object' }, messages: [{ role: 'system', content: '你是视频内容分析器。只返回 JSON：{"summary":"中文核心总结","mindmap":{"label":"视频主题","children":[{"label":"主题分支","children":[{"label":"具体内容要点","time":12.34,"start":10.2,"end":18.7}]}]}}。根据逐字稿组织视频内容的思维导图，最多5层、50个节点，建议不超过12个末节点。每个末节点必须提供对应内容在原视频中的 time、start、end 秒数，依据真实逐字稿时间，满足 start <= time <= end。每个末节点会内嵌该 time 截取的关键帧图片。非末节点使用 children，末节点使用 time、start、end。你没有看到视频画面，不要编造视觉细节。' }, { role: 'user', content: `视频时长 ${duration.toFixed(1)} 秒。以下是带时间戳的逐字稿：\n${transcript.slice(0, 100000)}` }] }), signal: AbortSignal.timeout(5 * 60 * 1000) });
   const body = await response.text();
   if (!response.ok) throw new Error(`视频总结失败（HTTP ${response.status}）`);
   const content = JSON.parse(body).choices?.[0]?.message?.content || '{}';
@@ -167,10 +168,9 @@ async function summarize(transcript, duration) {
   return { summary: String(result.summary || ''), mindmap, keyframes: mindmapLeaves(mindmap) };
 }
 const mindmapLeaves = node => node.children?.length ? node.children.flatMap(mindmapLeaves) : [node];
-export function validateMindmap(node, duration, depth = 0, budget = { count: 0, leaves: 0 }) {
-  if (!node || typeof node.label !== 'string' || !node.label.trim() || node.label.length > 300 || depth > 4 || ++budget.count > 30) throw new Error('思维导图结构无效');
+export function validateMindmap(node, duration, depth = 0, budget = { count: 0 }) {
+  if (!node || typeof node.label !== 'string' || !node.label.trim() || node.label.length > 300 || depth > 4 || ++budget.count > 50) throw new Error('思维导图结构无效');
   if (Array.isArray(node.children) && node.children.length) return { label: node.label.trim(), children: node.children.map(child => validateMindmap(child, duration, depth + 1, budget)) };
-  if (++budget.leaves > 12) throw new Error('思维导图末节点超过 12 个，请重试生成');
   let time = node.time;
   if (typeof time === 'string') {
     const value = time.trim();
@@ -178,12 +178,16 @@ export function validateMindmap(node, duration, depth = 0, budget = { count: 0, 
     else if (/^(?:\d+:)?[0-5]\d:[0-5]\d(?:\.\d+)?$/.test(value)) time = value.split(':').reduce((seconds, part) => seconds * 60 + Number(part), 0);
   }
   if (!Number.isFinite(time) || time < 0 || time >= duration) throw new Error(`思维导图末节点时间无效：${node.label.slice(0, 60)}；time=${JSON.stringify(node.time) ?? '缺失'}，要求 0 <= time < ${duration} 秒`);
-  return { label: node.label.trim(), time };
+  if (node.start === undefined && node.end === undefined) return { label: node.label.trim(), time };
+  const start = typeof node.start === 'string' && /^\d+(?:\.\d+)?$/.test(node.start.trim()) ? Number(node.start) : node.start;
+  const end = typeof node.end === 'string' && /^\d+(?:\.\d+)?$/.test(node.end.trim()) ? Number(node.end) : node.end;
+  if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || end <= start || end > duration || time < start || time > end) throw new Error(`思维导图时间范围无效：${node.label.slice(0, 60)}`);
+  return { label: node.label.trim(), time, start, end };
 }
 export function renderMindmap(node, images) {
   const escape = value => String(value).replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]);
   let index = 0;
-  const branch = item => `<li><span>${escape(item.label)}</span>${item.children?.length ? `<ul>${item.children.map(branch).join('')}</ul>` : `<figure><img src="${escape(images[index++].url)}" alt="${escape(item.label)}"><figcaption>${formatTime(item.time)}</figcaption></figure>`}</li>`;
+  const branch = item => `<li${Number.isFinite(item.start) && Number.isFinite(item.end) ? ` data-start="${item.start}" data-end="${item.end}"` : ''}><span>${escape(item.label)}</span>${item.children?.length ? `<ul>${item.children.map(branch).join('')}</ul>` : `<figure><img src="${escape(images[index++].url)}" alt="${escape(item.label)}"><figcaption>${formatTime(item.time)}</figcaption></figure>`}</li>`;
   return `<div class="video-mindmap"><ul>${branch(node)}</ul></div>`;
 }
 export async function findVideoCache(dataDir, attachments) {

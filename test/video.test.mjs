@@ -74,6 +74,16 @@ test('mindmap embeds one image per leaf and rejects invalid capture times', () =
   for (const time of [-1, 5, NaN, undefined]) assert.throws(() => validateMindmap({ label: '无效', time }, 5));
 });
 
+test('mindmap preserves validated ranges while accepting legacy capture times', () => {
+  const tree = validateMindmap({ label: '要点', time: 2, start: '1.25', end: 5 }, 5);
+  assert.deepEqual(tree, { label: '要点', time: 2, start: 1.25, end: 5 });
+  assert.match(renderMindmap(tree, [{ url: '/frame.png' }]), /data-start="1.25" data-end="5"/);
+  assert.deepEqual(validateMindmap({ label: '旧要点', time: 2 }, 5), { label: '旧要点', time: 2 });
+  for (const range of [{ start: -1, end: 3 }, { start: 2, end: 2 }, { start: 3, end: 4 }, { start: 0, end: 1 }, { start: 0, end: 6 }, { start: 1 }, { start: null, end: 3 }]) {
+    assert.throws(() => validateMindmap({ label: '无效范围', time: 2, ...range }, 5), /时间范围无效/);
+  }
+});
+
 test('transcriptions preserve model timestamps and reject missing or invalid timing', () => {
   const result = parseTranscription({ segments: [{ start: 0.12, end: 3.45, text: ' 第一段。 ' }, { start: 4.5, end: 8.9, text: '第二段。' }], words: [{ start: 0.12, end: 0.8, word: '第一段' }] });
   assert.equal(formatTranscript(result), '[00:00:00.120-00:00:03.450] 第一段。\n\n[00:00:04.500-00:00:08.900] 第二段。');
@@ -85,10 +95,22 @@ test('video duration limit is twenty minutes', () => {
   assert.equal(MAX_VIDEO_SECONDS, 20 * 60);
 });
 
-test('mindmap accepts explicit timestamp strings and distinguishes invalid times from leaf limits', () => {
+test('mindmap accepts explicit timestamp strings and rejects invalid times', () => {
   for (const time of ['83.45', '00:01:23.450', '01:23.450']) assert.equal(validateMindmap({ label: '节点', time }, 100).time, 83.45);
   for (const time of ['', null, '00:99:12', '12秒', 100, -1]) assert.throws(() => validateMindmap({ label: '节点', time }, 100), /节点时间无效/);
-  assert.throws(() => validateMindmap({ label: '根', children: Array.from({ length: 13 }, () => ({ label: '节点', time: 1 })) }, 100), /超过 12/);
+});
+
+test('mindmap preserves more than twelve leaves within the total node budget', () => {
+  for (const count of [13, 49]) {
+    const children = Array.from({ length: count }, (_, index) => ({ label: `节点${index}`, time: index }));
+    const tree = validateMindmap({ label: '根', children }, 100);
+    assert.deepEqual(tree.children, children);
+    const html = renderMindmap(tree, children.map((_, index) => ({ url: `/frame-${index}.png` })));
+    assert.equal((html.match(/<img /g) || []).length, count);
+    assert.match(html, new RegExp(`/frame-${count - 1}\\.png`));
+    assert.throws(() => validateMindmap({ label: '根', children: [...children.slice(0, -1), { label: '无效', time: 100 }] }, 100), /节点时间无效/);
+  }
+  assert.throws(() => validateMindmap({ label: '根', children: Array.from({ length: 50 }, () => ({ label: '节点', time: 1 })) }, 100), /结构无效/);
 });
 
 test('ASR ignores blank segments and invalid optional words without inventing timestamps', () => {
