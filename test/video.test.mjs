@@ -7,7 +7,11 @@ import { Readable } from 'node:stream';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { checkUrl, download, extractVideoUrls, isPrivateAddress, MAX_VIDEO_BYTES, videoTitleFromUrl } from '../video.mjs';
+import { checkUrl, download, extractVideoUrls, isPrivateAddress, MAX_VIDEO_BYTES, MAX_VIDEO_SECONDS, videoTitleFromUrl } from '../video.mjs';
+
+test('video duration limit is twenty minutes', () => {
+  assert.equal(MAX_VIDEO_SECONDS, 20 * 60);
+});
 
 test('video note titles use decoded URL filenames without media extensions', () => {
   const fallback = '父笔记 - 视频 1';

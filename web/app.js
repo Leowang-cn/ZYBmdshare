@@ -63,11 +63,19 @@ async function render() {
   } catch { notify('流程图加载失败'); }
 }
 function descendants(id) { const ids = new Set([id]); let changed = true; while (changed) { changed = false; for (const note of notes) if (ids.has(note.parentId) && !ids.has(note.id)) { ids.add(note.id); changed = true; } } return ids; }
+function resizeTitle() {
+  const title = element('title');
+  if (!title.getClientRects().length) return;
+  title.style.height = 'auto';
+  title.style.height = `${title.scrollHeight}px`;
+}
+element('title').addEventListener('input', resizeTitle);
+new ResizeObserver(resizeTitle).observe(document.querySelector('.document-heading'));
 function tree() {
   const container = element('tree'); container.replaceChildren();
   const query = element('search').value.toLowerCase();
   const visit = (parentId, depth = 0) => {
-    for (const note of notes.filter(item => item.parentId === parentId)) {
+    for (const note of notes.filter(item => item.parentId === parentId).sort((left, right) => left.title.localeCompare(right.title, 'zh-CN', { numeric: true, sensitivity: 'base' }))) {
       if (!query || (note.title + note.markdown).toLowerCase().includes(query)) {
         const button = document.createElement('button'); button.textContent = note.title; button.title = note.title; button.style.paddingLeft = `${12 + Math.min(depth, 8) * 14}px`; button.className = note.id === selected?.id ? 'active' : '';
         button.onclick = () => select(note.id); container.append(button);
@@ -85,6 +93,7 @@ function select(id, force = false) {
   for (const name of ['save', 'new-child', 'upload', 'share', 'remove']) element(name).disabled = !selected;
   if (selected) {
     element('title').value = selected.title; element('editor').value = selected.markdown;
+    resizeTitle();
     element('breadcrumb').textContent = selected.parentId ? notes.find(note => note.id === selected.parentId)?.title || '笔记' : (shareToken ? '只读分享' : '我的笔记');
     element('updated').textContent = new Date(selected.updatedAt).toLocaleString('zh-CN');
     const parent = element('parent'); parent.replaceChildren(new Option('根目录', ''));
@@ -178,6 +187,44 @@ element('file').onchange = async () => {
 };
 for (const mode of ['edit', 'preview', 'split']) action(`${mode}-tab`, () => { element('panes').className = `${mode}-mode`; for (const tab of ['edit', 'preview', 'split']) element(`${tab}-tab`).setAttribute('aria-pressed', String(mode === tab)); });
 const sidebar = visible => { document.body.classList.toggle('sidebar-closed', !visible); element('toggle-sidebar').setAttribute('aria-expanded', String(visible)); };
+const sidebarHandle = document.createElement('div');
+sidebarHandle.id = 'sidebar-resizer'; sidebarHandle.tabIndex = 0;
+sidebarHandle.setAttribute('role', 'separator'); sidebarHandle.setAttribute('aria-orientation', 'vertical');
+sidebarHandle.setAttribute('aria-label', '调整目录宽度'); sidebarHandle.setAttribute('aria-controls', 'tree');
+sidebarHandle.title = '调整目录宽度';
+document.querySelector('aside').append(sidebarHandle);
+let sidebarWidth = 240;
+try { sidebarWidth = Number(localStorage.getItem('mdshare-sidebar-width')) || 240; } catch {}
+const resizeSidebar = width => {
+  const maximum = Math.max(200, Math.min(600, window.innerWidth - 360));
+  sidebarWidth = Math.round(Math.max(200, Math.min(maximum, Number.isFinite(width) ? width : 240)));
+  element('workspace').style.setProperty('--sidebar-width', `${sidebarWidth}px`);
+  sidebarHandle.setAttribute('aria-valuemin', '200'); sidebarHandle.setAttribute('aria-valuemax', String(maximum));
+  sidebarHandle.setAttribute('aria-valuenow', String(sidebarWidth));
+};
+const rememberSidebar = () => { try { localStorage.setItem('mdshare-sidebar-width', String(sidebarWidth)); } catch {} };
+let sidebarDrag = null;
+sidebarHandle.addEventListener('pointerdown', event => {
+  if (event.button !== 0 || matchMedia('(max-width: 700px)').matches) return;
+  event.preventDefault();
+  sidebarDrag = { pointerId: event.pointerId, startX: event.clientX, width: sidebarWidth };
+  sidebarHandle.setPointerCapture(event.pointerId); document.body.classList.add('sidebar-resizing');
+});
+sidebarHandle.addEventListener('pointermove', event => {
+  if (sidebarDrag?.pointerId === event.pointerId) resizeSidebar(sidebarDrag.width + event.clientX - sidebarDrag.startX);
+});
+const endSidebarDrag = () => { sidebarDrag = null; document.body.classList.remove('sidebar-resizing'); rememberSidebar(); };
+sidebarHandle.addEventListener('pointerup', endSidebarDrag);
+sidebarHandle.addEventListener('pointercancel', endSidebarDrag);
+sidebarHandle.addEventListener('lostpointercapture', endSidebarDrag);
+sidebarHandle.addEventListener('keydown', event => {
+  if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+  event.preventDefault();
+  resizeSidebar(event.key === 'Home' ? 200 : event.key === 'End' ? 600 : sidebarWidth + (event.key === 'ArrowRight' ? 20 : -20));
+  rememberSidebar();
+});
+resizeSidebar(sidebarWidth);
+window.addEventListener('resize', () => { if (window.innerWidth > 700) resizeSidebar(sidebarWidth); });
 sidebar(!matchMedia('(max-width: 700px)').matches);
 action('toggle-sidebar', () => sidebar(document.body.classList.contains('sidebar-closed')));
 element('tree').addEventListener('click', () => { if (matchMedia('(max-width: 700px)').matches) sidebar(false); });

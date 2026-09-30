@@ -7,7 +7,7 @@ import { mkdir, open, unlink } from 'node:fs/promises';
 import path from 'node:path';
 
 export const MAX_VIDEO_BYTES = 512 * 1024 * 1024;
-export const MAX_VIDEO_SECONDS = 600;
+export const MAX_VIDEO_SECONDS = 1200;
 const MAX_REDIRECTS = 3;
 const MAX_URLS_PER_JOB = 20;
 const blockedAddresses = new BlockList();
@@ -112,7 +112,7 @@ async function probe(file) {
   if (!/mov|mp4|webm/.test(info.format_name || '')) throw new Error('仅支持 MP4 和 WebM 视频');
   const duration = Number(info.duration);
   if (!Number.isFinite(duration) || duration <= 0) throw new Error('无法读取视频时长');
-  if (duration > MAX_VIDEO_SECONDS) throw new Error('视频时长超过 10 分钟限制');
+  if (duration > MAX_VIDEO_SECONDS) throw new Error('视频时长超过 20 分钟限制');
   return { duration, format: info.format_name || 'video/mp4' };
 }
 async function transcribe(audio, filename) {
