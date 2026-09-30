@@ -134,20 +134,31 @@ async function shareList() {
   }
 }
 action('share', async () => { element('new-link').hidden = true; await shareList(); element('share-dialog').showModal(); });
-action('create-share', async () => { const pin = element('share-pin').value; const result = await api('/api/shares', 'POST', { noteId: selected.id, ...(pin ? { pin } : {}) }); element('share-url').value = new URL(result.url, location.origin).href; element('created-pin').textContent = result.pin; element('new-link').hidden = false; await shareList(); });
+function shareUrl(value) {
+  const raw = String(value || '').trim();
+  const path = /^[a-f0-9]{64}$/.test(raw) ? `/s/${raw}` : raw;
+  return new URL(path, location.origin).href;
+}
+action('create-share', async () => { const pin = element('share-pin').value; const result = await api('/api/shares', 'POST', { noteId: selected.id, ...(pin ? { pin } : {}) }); element('share-url').value = shareUrl(result.url || result.token); element('created-pin').textContent = result.pin; element('new-link').hidden = false; await shareList(); });
 action('copy-link', async () => {
   const input = element('share-url');
+  const value = shareUrl(input.value);
+  input.value = value;
   try {
-    if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(input.value);
+    if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(value);
     else throw new Error('clipboard API unavailable');
     notify('链接已复制');
   } catch {
     const fallback = document.createElement('textarea');
     fallback.value = input.value; fallback.setAttribute('readonly', '');
     fallback.style.cssText = 'position:fixed;top:-9999px;left:-9999px;opacity:0';
-    document.body.append(fallback); fallback.select();
+    element('share-dialog').append(fallback);
     let copied = false;
-    try { copied = document.execCommand('copy'); } finally { fallback.remove(); }
+    try {
+      fallback.focus({ preventScroll: true }); fallback.select();
+      fallback.setSelectionRange(0, fallback.value.length);
+      copied = document.activeElement === fallback && fallback.selectionEnd === fallback.value.length && document.execCommand('copy');
+    } catch { copied = false; } finally { fallback.remove(); }
     if (copied) notify('链接已复制');
     else { input.focus(); input.select(); notify('复制失败，请手动复制'); }
   }
