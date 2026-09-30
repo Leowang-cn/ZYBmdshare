@@ -42,6 +42,15 @@ export const checkUrl = async value => {
   const address = await publicHost(url.hostname.replace(/^\[|\]$/g, ''));
   return { url, address };
 };
+export function videoTitleFromUrl(value, fallback) {
+  let filename;
+  try {
+    filename = new URL(value).pathname.split('/').pop();
+  } catch { return fallback; }
+  try { filename = decodeURIComponent(filename); } catch {}
+  const title = filename.replace(/[\u0000-\u001f\u007f]/g, '').trim().replace(/\.(mp4|webm)$/i, '').trim();
+  return title && !/^\.+$/.test(title) ? [...title].slice(0, 200).join('') : fallback;
+}
 export function extractVideoUrls(markdown) {
   const urls = [...String(markdown || '').matchAll(/https?:\/\/[^\s<>"'`()\[\]]+/g)].map(match => match[0].replace(/[),.;!?]+$/, ''));
   return [...new Set(urls)].slice(0, MAX_URLS_PER_JOB);

@@ -7,7 +7,24 @@ import { Readable } from 'node:stream';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { checkUrl, download, extractVideoUrls, isPrivateAddress, MAX_VIDEO_BYTES } from '../video.mjs';
+import { checkUrl, download, extractVideoUrls, isPrivateAddress, MAX_VIDEO_BYTES, videoTitleFromUrl } from '../video.mjs';
+
+test('video note titles use decoded URL filenames without media extensions', () => {
+  const fallback = '父笔记 - 视频 1';
+  for (const [url, expected] of [
+    ['https://example.com/folder/flower.mp4?token=secret#play', 'flower'],
+    ['https://example.com/%E8%AF%AD%E6%96%87%20%E8%AF%BE%E7%A8%8B.WEBM', '语文 课程'],
+    ['https://example.com/1cdb8725557d352b051df8511f1db1dd.mp4', '1cdb8725557d352b051df8511f1db1dd'],
+    ['https://example.com/lesson.part.1.mp4', 'lesson.part.1'],
+    ['https://example.com/bad%ZZ.mp4', 'bad%ZZ'],
+    ['https://example.com/%00lesson%0A.mp4', 'lesson'],
+    ['https://example.com/', fallback],
+    ['https://example.com/folder/?name=lesson.mp4', fallback],
+    ['https://example.com/.mp4', fallback],
+    ['invalid', fallback],
+    [`https://example.com/${'a'.repeat(220)}.mp4`, 'a'.repeat(200)]
+  ]) assert.equal(videoTitleFromUrl(url, fallback), expected);
+});
 
 test('video URL extraction and address policy reject unsafe targets', async () => {
   assert.deepEqual(extractVideoUrls('a https://example.com/a.mp4, https://example.com/a.mp4\nhttps://example.com/b.webm'), ['https://example.com/a.mp4', 'https://example.com/b.webm']);

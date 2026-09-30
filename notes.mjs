@@ -4,7 +4,7 @@ import { createReadStream } from 'node:fs';
 import path from 'node:path';
 import { ZipFile } from 'yazl';
 import { answerNotes } from './ai.mjs';
-import { checkUrl, extractVideoUrls, runVideoJob } from './video.mjs';
+import { checkUrl, extractVideoUrls, runVideoJob, videoTitleFromUrl } from './video.mjs';
 
 const digest = value => createHash('sha256').update(value).digest('hex');
 const fail = (status, message) => { throw Object.assign(new Error(message), { status }); };
@@ -287,7 +287,7 @@ export async function createNotes({ dataDir, token }) {
             if (database.videoJobs.filter(job => !['completed', 'failed'].includes(job.status)).length + urls.length > 20) fail(429, '最多同时排队 20 个视频');
             if (database.videoJobs.length + urls.length > 1000) fail(409, '视频任务数量已达上限');
             return [...new Set(urls)].map((url, index) => {
-              const note = addNote(database, { title: `${parent.title.slice(0, 160)} - 视频 ${index + 1}`, parentId, markdown: '视频处理中。' });
+              const note = addNote(database, { title: videoTitleFromUrl(url, `${parent.title.slice(0, 160)} - 视频 ${index + 1}`), parentId, markdown: '视频处理中。' });
               const job = { id: randomUUID(), parentId, noteId: note.id, revision: note.revision, url, status: 'queued', progress: 0, createdAt: new Date().toISOString() };
               database.videoJobs.push(job); return job;
             });
