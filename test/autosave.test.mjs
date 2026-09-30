@@ -1,9 +1,17 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { Autosave, mergeChanges } from '../web/autosave.js';
+import { Autosave, createDraftOwner, mergeChanges } from '../web/autosave.js';
 
 const note = { id: 'one', title: 'Title', markdown: 'Body', parentId: null, revision: 1 };
 const conflict = () => Object.assign(new Error('Conflict'), { status: 409 });
+
+test('draft owners work without randomUUID on plain HTTP', () => {
+  const provider = { getRandomValues: bytes => bytes.map((byte, index) => index) };
+  assert.equal(createDraftOwner(provider), '000102030405060708090a0b0c0d0e0f');
+  const owners = Array.from({ length: 100 }, () => createDraftOwner());
+  assert.equal(new Set(owners).size, owners.length);
+  assert.ok(owners.every(owner => /^[a-f0-9]{32}$/.test(owner)));
+});
 
 test('merges different fields but reports competing edits', () => {
   assert.deepEqual(mergeChanges(note, { ...note, title: 'Mine' }, { ...note, markdown: 'Remote' }), {

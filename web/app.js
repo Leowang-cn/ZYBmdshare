@@ -5,7 +5,7 @@ import { createIcons, Plus, Download, LogOut, FilePlus, Paperclip, Share2, Trash
 import { setupAI } from './ai.js';
 import { setupVideo } from './video.js';
 import { enhanceMindmaps } from './mindmap.js';
-import { Autosave, fields, same } from './autosave.js';
+import { Autosave, createDraftOwner, fields, same } from './autosave.js';
 import 'katex/dist/katex.min.css';
 import './minimal.css';
 
@@ -23,7 +23,7 @@ let saveTimer;
 let composing = false;
 let storageWarning = false;
 const draftPrefix = 'mdshare-draft-v1:';
-const draftOwner = crypto.randomUUID();
+const draftOwner = createDraftOwner();
 let draftKey = null;
 let restoredDraft = null;
 const conflictDialog = document.createElement('dialog');

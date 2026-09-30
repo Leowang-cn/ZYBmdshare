@@ -2,6 +2,10 @@ export const fields = ['title', 'markdown', 'parentId'];
 export const values = note => Object.fromEntries(fields.map(field => [field, note[field]]));
 export const same = (left, right) => fields.every(field => left[field] === right[field]);
 
+export function createDraftOwner(cryptoProvider = globalThis.crypto) {
+  return Array.from(cryptoProvider.getRandomValues(new Uint8Array(16)), byte => byte.toString(16).padStart(2, '0')).join('');
+}
+
 export function mergeChanges(base, local, remote) {
   const conflicts = fields.filter(field => local[field] !== base[field] && remote[field] !== base[field] && local[field] !== remote[field]);
   const merged = Object.fromEntries(fields.map(field => [field, local[field] !== base[field] ? local[field] : remote[field]]));
