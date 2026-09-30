@@ -74,13 +74,16 @@ test('mindmap embeds one image per leaf and rejects invalid capture times', () =
   for (const time of [-1, 5, NaN, undefined]) assert.throws(() => validateMindmap({ label: '无效', time }, 5));
 });
 
-test('mindmap preserves validated ranges while accepting legacy capture times', () => {
+test('mindmap preserves valid ranges and degrades invalid ranges to capture times', () => {
   const tree = validateMindmap({ label: '要点', time: 2, start: '1.25', end: 5 }, 5);
   assert.deepEqual(tree, { label: '要点', time: 2, start: 1.25, end: 5 });
   assert.match(renderMindmap(tree, [{ url: '/frame.png' }]), /data-start="1.25" data-end="5"/);
   assert.deepEqual(validateMindmap({ label: '旧要点', time: 2 }, 5), { label: '旧要点', time: 2 });
-  for (const range of [{ start: -1, end: 3 }, { start: 2, end: 2 }, { start: 3, end: 4 }, { start: 0, end: 1 }, { start: 0, end: 6 }, { start: 1 }, { start: null, end: 3 }]) {
-    assert.throws(() => validateMindmap({ label: '无效范围', time: 2, ...range }, 5), /时间范围无效/);
+  for (const range of [{ start: -1, end: 3 }, { start: 2, end: 2 }, { start: 4, end: 1 }, { start: 3, end: 4 }, { start: 0, end: 1 }, { start: 0, end: 6 }, { start: 1 }, { end: 3 }, { start: null, end: 3 }, { start: '未知', end: 3 }, { start: NaN, end: Infinity }]) {
+    const fallback = validateMindmap({ label: '无效范围', time: 2, ...range }, 5);
+    assert.deepEqual(fallback, { label: '无效范围', time: 2 });
+    assert.doesNotMatch(renderMindmap(fallback, [{ url: '/frame.png' }]), /data-start|data-end/);
+    assert.throws(() => validateMindmap({ label: '无效截图', time: 5, ...range }, 5), /节点时间无效/);
   }
 });
 

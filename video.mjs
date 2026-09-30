@@ -181,7 +181,7 @@ export function validateMindmap(node, duration, depth = 0, budget = { count: 0 }
   if (node.start === undefined && node.end === undefined) return { label: node.label.trim(), time };
   const start = typeof node.start === 'string' && /^\d+(?:\.\d+)?$/.test(node.start.trim()) ? Number(node.start) : node.start;
   const end = typeof node.end === 'string' && /^\d+(?:\.\d+)?$/.test(node.end.trim()) ? Number(node.end) : node.end;
-  if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || end <= start || end > duration || time < start || time > end) throw new Error(`思维导图时间范围无效：${node.label.slice(0, 60)}`);
+  if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || end <= start || end > duration || time < start || time > end) return { label: node.label.trim(), time };
   return { label: node.label.trim(), time, start, end };
 }
 export function renderMindmap(node, images) {

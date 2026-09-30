@@ -5,6 +5,7 @@ import { createIcons, Plus, Download, LogOut, FilePlus, Paperclip, Share2, Trash
 import { setupAI } from './ai.js';
 import { setupVideo } from './video.js';
 import { enhanceMindmaps } from './mindmap.js';
+import { Autosave, fields, same } from './autosave.js';
 import 'katex/dist/katex.min.css';
 import './minimal.css';
 
@@ -17,6 +18,97 @@ let rendering = 0;
 let cleanupMindmaps = () => {};
 let timer;
 let busy = false;
+let saver = null;
+let saveTimer;
+let composing = false;
+let storageWarning = false;
+const draftPrefix = 'mdshare-draft-v1:';
+const draftOwner = crypto.randomUUID();
+let draftKey = null;
+let restoredDraft = null;
+const conflictDialog = document.createElement('dialog');
+conflictDialog.setAttribute('aria-label', '解决保存冲突');
+document.body.append(conflictDialog);
+function persistDraft() {
+  if (!saver || shareToken || !draftKey) return;
+  try {
+    if (saver.dirty) localStorage.setItem(draftKey, JSON.stringify({ base: saver.base, local: saver.local, updatedAt: Date.now() }));
+    else {
+      localStorage.removeItem(draftKey);
+      if (restoredDraft && localStorage.getItem(restoredDraft.key) === restoredDraft.raw) localStorage.removeItem(restoredDraft.key);
+      restoredDraft = null;
+    }
+  } catch {
+    if (!storageWarning) notify('本地草稿存储不可用，请保持页面打开并确认云端保存成功');
+    storageWarning = true;
+  }
+}
+function syncEditor() {
+  selected = saver.base;
+  notes = notes.map(note => note.id === selected.id ? selected : note);
+  const mapping = { title: 'title', markdown: 'editor', parentId: 'parent' };
+  let markdownChanged = false;
+  for (const field of fields) {
+    const input = element(mapping[field]);
+    const value = saver.local[field] ?? '';
+    if (input.value !== value) {
+      if (field === 'parentId' && value && ![...input.options].some(option => option.value === value)) input.add(new Option(notes.find(note => note.id === value)?.title || '父笔记', value));
+      input.value = value;
+      if (field === 'markdown') markdownChanged = true;
+    }
+  }
+  dirty = saver.dirty;
+  persistDraft();
+  resizeTitle();
+  element('updated').textContent = new Date(selected.updatedAt).toLocaleString('zh-CN');
+  if (markdownChanged) void render();
+  tree();
+}
+function scheduleSave() {
+  clearTimeout(saveTimer);
+  if (!shareToken && dirty && !composing && !saver?.conflict) saveTimer = setTimeout(() => { save().catch(() => {}); }, 1000);
+}
+function showConflict() {
+  if (!saver?.conflict || conflictDialog.open) return;
+  conflictDialog.replaceChildren();
+  const heading = document.createElement('h2'); heading.textContent = '笔记存在冲突';
+  conflictDialog.append(heading);
+  const names = { title: '标题', markdown: '正文', parentId: '父笔记' };
+  for (const field of saver.conflict.fields) {
+    const heading = document.createElement('h3'); heading.textContent = names[field]; conflictDialog.append(heading);
+    for (const [label, value] of [['本地', saver.local[field]], ['服务器', saver.conflict.remote[field]]]) {
+      const text = document.createElement('pre'); text.style.cssText = 'white-space:pre-wrap;overflow:auto;max-height:160px;max-width:600px';
+      text.textContent = `${label}：${value ?? '根目录'}`; conflictDialog.append(text);
+    }
+  }
+  for (const [label, choice] of [['保留本地冲突字段', 'local'], ['采用服务器冲突字段', 'remote'], ['稍后处理', null]]) {
+    const button = document.createElement('button'); button.textContent = label;
+    button.onclick = () => {
+      conflictDialog.close();
+      if (choice) { saver.resolve(choice); syncEditor(); save().catch(() => {}); }
+    };
+    conflictDialog.append(button);
+  }
+  conflictDialog.showModal();
+}
+function restoreDraft() {
+  draftKey = `${draftPrefix}${selected.id}:${draftOwner}`;
+  restoredDraft = null;
+  try {
+    const drafts = Object.keys(localStorage).filter(key => key.startsWith(`${draftPrefix}${selected.id}:`)).flatMap(key => {
+      try { const raw = localStorage.getItem(key); const value = JSON.parse(raw); return value?.local && value?.base ? [{ key, raw, value }] : []; } catch { return []; }
+    }).sort((left, right) => right.value.updatedAt - left.value.updatedAt);
+    const draft = drafts.find(item => item.value?.local && !same(item.value.local, selected));
+    if (draft && confirm('发现此笔记的本地未保存草稿，是否恢复？')) {
+      if (saver.restore(draft.value)) {
+        restoredDraft = draft;
+        syncEditor();
+        element('status').textContent = '草稿已恢复，待保存';
+        scheduleSave();
+      }
+    }
+  } catch { notify('无法读取本地草稿'); }
+}
 const icons = () => createIcons({ icons: { Plus, Download, LogOut, FilePlus, Paperclip, Share2, Trash2, Save, NotebookPen, X, PanelLeft, Ellipsis, MessageCircle, ArrowUp, Square, Copy, Video, RefreshCw } });
 icons();
 function notify(message) { element('toast').textContent = message; element('toast').hidden = false; clearTimeout(timer); timer = setTimeout(() => { element('toast').hidden = true; }, 6000); }
@@ -82,16 +174,16 @@ function tree() {
     for (const note of notes.filter(item => item.parentId === parentId).sort((left, right) => left.title.localeCompare(right.title, 'zh-CN', { numeric: true, sensitivity: 'base' }))) {
       if (!query || (note.title + note.markdown).toLowerCase().includes(query)) {
         const button = document.createElement('button'); button.textContent = note.title; button.title = note.title; button.style.paddingLeft = `${12 + Math.min(depth, 8) * 14}px`; button.className = note.id === selected?.id ? 'active' : '';
-        button.onclick = () => select(note.id); container.append(button);
+        button.onclick = () => select(note.id).catch(error => notify(error.message)); container.append(button);
       }
       visit(note.id, depth + 1);
     }
   };
   visit(null); element('count').textContent = `${notes.length} 篇笔记`;
 }
-function select(id, force = false) {
-  if (busy) return;
-  if (!force && dirty && !confirm('放弃未保存的修改？')) return;
+async function select(id, force = false) {
+  if (!force && (dirty || busy)) await save();
+  clearTimeout(saveTimer);
   selected = notes.find(note => note.id === id) || null; dirty = false;
   element('document').hidden = !selected; element('empty').hidden = !!selected;
   for (const name of ['save', 'new-child', 'upload', 'share', 'remove']) element(name).disabled = !selected;
@@ -104,38 +196,61 @@ function select(id, force = false) {
     const excluded = descendants(selected.id);
     for (const note of notes) if (!excluded.has(note.id)) parent.add(new Option(note.title, note.id));
     parent.value = selected.parentId || ''; element('status').textContent = shareToken ? '只读' : '已保存';
+    if (!shareToken) {
+      saver = new Autosave({ note: selected, put: (id, value) => api(`/api/notes/${id}`, 'PUT', value), get: id => api(`/api/notes/${id}`), changed: reason => { dirty = saver.dirty; if (reason === 'edit') persistDraft(); else syncEditor(); } });
+      restoreDraft();
+    }
     void render();
-  }
+  } else { saver = null; draftKey = null; }
   tree();
 }
 async function load(preferred) {
   const result = await api(shareToken ? `/api/public/${shareToken}` : '/api/notes'); notes = result.notes;
   element('login').hidden = true; element('workspace').hidden = false;
   element('pin-login').hidden = true;
-  select(preferred || result.rootId || notes[0]?.id, true);
+  await select(preferred || result.rootId || notes[0]?.id, true);
 }
 async function create(parentId) {
-  if (dirty && !confirm('放弃未保存的修改？')) return;
+  if (dirty || busy) await save();
   const note = await api('/api/notes', 'POST', { title: '未命名笔记', markdown: '', parentId });
   await load(note.id); element('title').focus(); element('title').select();
 }
 async function save() {
-  if (!selected || busy) return;
+  if (!selected || shareToken || !saver) return;
+  clearTimeout(saveTimer);
+  if (busy) return saver.flush();
   busy = true;
   element('save').disabled = true;
-  for (const id of ['title', 'editor', 'parent']) element(id).disabled = true;
+  element('status').textContent = '保存中';
   try {
-    const note = await api(`/api/notes/${selected.id}`, 'PUT', { title: element('title').value, markdown: element('editor').value, parentId: element('parent').value || null, revision: selected.revision });
-    notes = notes.map(item => item.id === note.id ? note : item); selected = note; dirty = false; element('status').textContent = '已保存'; tree();
-  } finally { busy = false; element('save').disabled = false; for (const id of ['title', 'editor', 'parent']) element(id).disabled = false; }
+    await saver.flush();
+    syncEditor();
+    element('status').textContent = '已保存';
+  } catch (error) {
+    syncEditor();
+    element('status').textContent = error.conflict ? '存在冲突' : '保存失败，修改已保留';
+    if (error.conflict) showConflict(); else notify(`保存失败：${error.message}。可点击保存重试。`);
+    throw error;
+  } finally { busy = false; element('save').disabled = false; }
 }
 element('login-form').onsubmit = async event => { event.preventDefault(); try { await api('/api/session', 'POST', { token: element('token').value }); element('token').value = ''; await load(); } catch (error) { element('login-error').textContent = error.message; } };
 element('pin-form').onsubmit = async event => { event.preventDefault(); try { await api(`/api/public/${shareToken}/unlock`, 'POST', { pin: element('reader-pin').value }); element('reader-pin').value = ''; await load(); } catch (error) { element('pin-error').textContent = error.message; } };
-for (const id of ['title', 'editor', 'parent']) element(id).addEventListener('input', () => { dirty = true; element('status').textContent = '未保存'; if (id === 'editor') { clearTimeout(render.timer); render.timer = setTimeout(render, 350); } });
+for (const id of ['title', 'editor', 'parent']) {
+  element(id).addEventListener('input', () => {
+    if (shareToken || !saver) return;
+    saver.edit({ title: element('title').value, markdown: element('editor').value, parentId: element('parent').value || null });
+    element('status').textContent = saver.conflict ? '存在冲突' : busy ? '保存中' : dirty ? '待保存' : '已保存';
+    scheduleSave();
+    if (id === 'editor') { clearTimeout(render.timer); render.timer = setTimeout(render, 350); }
+  });
+  element(id).addEventListener('compositionstart', () => { composing = true; clearTimeout(saveTimer); });
+  element(id).addEventListener('compositionend', () => { composing = false; scheduleSave(); });
+}
+window.addEventListener('online', scheduleSave);
 element('search').oninput = tree;
 action('new-root', () => create(null)); action('empty-create', () => create(null)); action('new-child', () => create(selected.id)); action('save', save);
-action('remove', async () => { if (selected && confirm(`删除“${selected.title}”及全部子笔记？此操作不可撤销。`)) { await api(`/api/notes/${selected.id}`, 'DELETE', { revision: selected.revision }); dirty = false; await load(); } });
-action('logout', async () => { if (dirty && !confirm('放弃未保存的修改并退出？')) return; await api('/api/session', 'DELETE'); dirty = false; location.reload(); });
+action('remove', async () => { if (selected && confirm(`删除“${selected.title}”及全部子笔记？此操作不可撤销。`)) { await save(); await api(`/api/notes/${selected.id}`, 'DELETE', { revision: selected.revision }); dirty = false; await load(); } });
+action('logout', async () => { if (dirty || busy) await save(); await api('/api/session', 'DELETE'); dirty = false; location.reload(); });
 action('backup', async () => { const state = await api('/api/export'); const url = URL.createObjectURL(new Blob([JSON.stringify(state, null, 2)], { type: 'application/json' })); const anchor = document.createElement('a'); anchor.href = url; anchor.download = `mdshare-${new Date().toISOString().slice(0, 10)}.json`; anchor.click(); setTimeout(() => URL.revokeObjectURL(url), 1000); });
 async function shareList() {
   const { shares } = await api('/api/shares'); const container = element('share-list'); container.replaceChildren();
