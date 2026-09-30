@@ -94,6 +94,9 @@ export async function createNotes({ dataDir, token }) {
         try {
           await runVideoJob(current, {
             dataDir,
+            cachedAttachments: current.attachmentIds
+              ? current.attachmentIds.map(id => state.attachments.find(item => item.id === id && item.noteId === current.noteId)).filter(Boolean)
+              : state.attachments.filter(item => item.noteId === current.noteId),
             saveAttachment: async file => {
               const attachment = { id: randomUUID(), noteId: current.noteId, name: file.name, type: file.type, size: (await stat(file.path)).size };
               staged.push(attachment);
@@ -110,6 +113,7 @@ export async function createNotes({ dataDir, token }) {
                   validate(database, { ...note, markdown }, note.id);
                   note.markdown = markdown; note.revision += 1; note.updatedAt = new Date().toISOString();
                   database.attachments.push(...staged);
+                  record.attachmentIds = attachments.map(item => item.id);
                 }
                 Object.assign(record, patch, { updatedAt: new Date().toISOString() });
               });
@@ -143,7 +147,7 @@ export async function createNotes({ dataDir, token }) {
   void runVideos().catch(() => {});
   return async (request, response, url) => {
     const route = url.pathname;
-    if (!route.startsWith('/api/notes') && !route.startsWith('/api/shares') && !route.startsWith('/api/public/') && !route.startsWith('/api/session') && !route.startsWith('/api/attachments/') && route !== '/api/export' && route !== '/api/ai/chat') return false;
+    if (!route.startsWith('/api/notes') && !route.startsWith('/api/shares') && !route.startsWith('/api/public/') && !route.startsWith('/api/session') && !route.startsWith('/api/attachments/') && route !== '/api/export' && route !== '/api/ai/chat' && route !== '/api/videos' && route !== '/api/videos/regenerate') return false;
     const send = (status, value, headers = {}) => {
       response.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', ...headers });
       response.end(JSON.stringify(value));
@@ -273,18 +277,37 @@ export async function createNotes({ dataDir, token }) {
       if (!bearer && !['GET', 'HEAD'].includes(request.method)) {
         if (!request.headers.origin || new URL(request.headers.origin).host !== request.headers.host) fail(403, 'Cross-origin request denied');
       }
-      if (/^\/api\/notes\/[^/]+\/videos$/.test(route)) {
+      if (route === '/api/videos' && request.method === 'GET') {
+        send(200, { jobs: state.videoJobs.filter(job => state.notes.some(note => note.id === job.noteId)).map(job => ({ ...job, title: getNote(state, job.noteId).title })) });
+      } else if (route === '/api/videos/regenerate' && request.method === 'POST') {
+        const input = await jsonBody(request);
+        if (!Array.isArray(input.noteIds) || !input.noteIds.length || input.noteIds.length > 30 || input.noteIds.some(id => typeof id !== 'string') || new Set(input.noteIds).size !== input.noteIds.length) fail(400, '请选择 1-30 篇视频笔记');
+        const jobs = await mutate(database => {
+          const targets = input.noteIds.map(id => {
+            const note = getNote(database, id);
+            const job = database.videoJobs.find(item => item.noteId === id) || fail(400, '所选笔记不是视频解析笔记');
+            if (!['completed', 'failed'].includes(job.status)) fail(409, '所选笔记正在处理中');
+            return { note, job };
+          });
+          if (database.videoJobs.filter(job => !['completed', 'failed'].includes(job.status)).length + targets.length > 30) fail(429, '最多同时排队 30 个视频');
+          return targets.map(({ note, job }) => {
+            job.revision = note.revision; job.status = 'queued'; job.progress = 0; delete job.error;
+            return job;
+          });
+        });
+        send(202, { jobs }); void runVideos().catch(() => {});
+      } else if (/^\/api\/notes\/[^/]+\/videos$/.test(route)) {
         const parentId = route.split('/')[3];
         const parent = getNote(state, parentId);
         if (request.method === 'GET') send(200, { jobs: state.videoJobs.filter(job => job.parentId === parentId) });
         else if (request.method === 'POST') {
           const input = await jsonBody(request);
           const urls = input.urls ?? extractVideoUrls(parent.markdown);
-          if (!Array.isArray(urls) || !urls.length || urls.length > 20 || urls.some(url => typeof url !== 'string')) fail(400, '需要 1-20 个视频 URL');
+          if (!Array.isArray(urls) || !urls.length || urls.length > 30 || urls.some(url => typeof url !== 'string')) fail(400, '需要 1-30 个视频 URL');
           try { for (const url of urls) await checkUrl(url); } catch { fail(400, '视频 URL 无效或指向内网、保留地址'); }
           const jobs = await mutate(database => {
             getNote(database, parentId);
-            if (database.videoJobs.filter(job => !['completed', 'failed'].includes(job.status)).length + urls.length > 20) fail(429, '最多同时排队 20 个视频');
+            if (database.videoJobs.filter(job => !['completed', 'failed'].includes(job.status)).length + urls.length > 30) fail(429, '最多同时排队 30 个视频');
             if (database.videoJobs.length + urls.length > 1000) fail(409, '视频任务数量已达上限');
             return [...new Set(urls)].map((url, index) => {
               const note = addNote(database, { title: videoTitleFromUrl(url, `${parent.title.slice(0, 160)} - 视频 ${index + 1}`), parentId, markdown: '视频处理中。' });

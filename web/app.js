@@ -1,7 +1,7 @@
 import { marked } from 'marked';
 import DOMPurify from 'dompurify';
 import katex from 'katex';
-import { createIcons, Plus, Download, LogOut, FilePlus, Paperclip, Share2, Trash2, Save, NotebookPen, X, PanelLeft, Ellipsis, MessageCircle, ArrowUp, Square, Copy, Video } from 'lucide';
+import { createIcons, Plus, Download, LogOut, FilePlus, Paperclip, Share2, Trash2, Save, NotebookPen, X, PanelLeft, Ellipsis, MessageCircle, ArrowUp, Square, Copy, Video, RefreshCw } from 'lucide';
 import { setupAI } from './ai.js';
 import { setupVideo } from './video.js';
 import 'katex/dist/katex.min.css';
@@ -15,7 +15,7 @@ let dirty = false;
 let rendering = 0;
 let timer;
 let busy = false;
-const icons = () => createIcons({ icons: { Plus, Download, LogOut, FilePlus, Paperclip, Share2, Trash2, Save, NotebookPen, X, PanelLeft, Ellipsis, MessageCircle, ArrowUp, Square, Copy, Video } });
+const icons = () => createIcons({ icons: { Plus, Download, LogOut, FilePlus, Paperclip, Share2, Trash2, Save, NotebookPen, X, PanelLeft, Ellipsis, MessageCircle, ArrowUp, Square, Copy, Video, RefreshCw } });
 icons();
 function notify(message) { element('toast').textContent = message; element('toast').hidden = false; clearTimeout(timer); timer = setTimeout(() => { element('toast').hidden = true; }, 6000); }
 async function api(route, method = 'GET', value) {
@@ -232,7 +232,7 @@ document.addEventListener('click', event => { if (!element('more').contains(even
 window.addEventListener('beforeunload', event => { if (dirty) { event.preventDefault(); event.returnValue = ''; } });
 document.addEventListener('keydown', event => { if ((event.ctrlKey || event.metaKey) && event.key === 's' && !shareToken) { event.preventDefault(); save().catch(error => notify(error.message)); } });
 if (!shareToken) setupAI({ element, api, notify, icons, getNotes: () => notes, getSelected: () => selected, isDirty: () => dirty, refresh: async note => { if (dirty || busy) { notes.push(note); tree(); } else await load(note.id); } });
-if (!shareToken) setupVideo({ api, notify, icons, getSelected: () => selected, getMarkdown: () => element('editor').value, refresh: async id => { if (busy || dirty) throw new Error('请先保存当前笔记'); await load(id); } });
+if (!shareToken) setupVideo({ api, notify, icons, getSelected: () => selected, getMarkdown: () => element('editor').value, hasUnsaved: () => busy || dirty, refresh: async id => { if (busy || dirty) throw new Error('请先保存当前笔记'); await load(id); } });
 if (shareToken) {
   document.body.classList.add('shared'); element('title').readOnly = true;
   const download = document.createElement('button');

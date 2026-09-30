@@ -1,11 +1,37 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, readdir } from 'node:fs/promises';
+import { mkdtemp, rm, readdir, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { once } from 'node:events';
 import { createProbe } from '../server.mjs';
 import { unzipSync, strFromU8 } from 'fflate';
+
+test('video regeneration is atomic and preserves existing note titles and content on failure', async () => {
+  const dataDir = await mkdtemp(path.join(os.tmpdir(), 'mdshare-regenerate-'));
+  const token = 'test-token-with-at-least-24-characters';
+  const note = { id: 'video-note', title: '自定义标题', markdown: '原正文', parentId: null, revision: 3 };
+  await writeFile(path.join(dataDir, 'notes.json'), JSON.stringify({ version: 1, notes: [note, { ...note, id: 'ordinary' }], shares: [], attachments: [], videoJobs: [{ id: 'job', noteId: note.id, parentId: 'ordinary', url: 'http://127.0.0.1/video.mp4', status: 'completed', revision: 1 }] }));
+  const server = await createProbe({ dataDir, token });
+  server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const request = (route, value) => fetch(base + route, { method: value ? 'POST' : 'GET', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: value ? JSON.stringify(value) : undefined });
+  try {
+    assert.equal((await fetch(base + '/api/videos')).status, 401);
+    assert.equal((await request('/api/videos/regenerate', { noteIds: ['video-note', 'ordinary'] })).status, 400);
+    assert.equal((await (await request('/api/videos')).json()).jobs[0].status, 'completed');
+    assert.equal((await request('/api/videos/regenerate', { noteIds: ['video-note', 'video-note'] })).status, 400);
+    const response = await request('/api/videos/regenerate', { noteIds: ['video-note'] });
+    assert.equal(response.status, 202);
+    assert.equal((await response.json()).jobs[0].revision, 3);
+    for (let attempt = 0; attempt < 100; attempt++) {
+      if ((await (await request('/api/videos')).json()).jobs[0].status === 'failed') break;
+      if (attempt === 99) assert.fail('job did not finish');
+    }
+    const preserved = await (await request('/api/notes/video-note')).json();
+    assert.equal(preserved.title, note.title); assert.equal(preserved.markdown, note.markdown); assert.equal(preserved.revision, 3);
+  } finally { await new Promise(resolve => server.close(resolve)); await rm(dataDir, { recursive: true, force: true }); }
+});
 
 test('notes persist; batch is atomic; shares isolate subtrees and can be revoked', async () => {
   const dataDir = await mkdtemp(path.join(os.tmpdir(), 'mdshare-notes-'));

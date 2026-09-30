@@ -4,13 +4,91 @@ import http from 'node:http';
 import { promises as dns } from 'node:dns';
 import { EventEmitter } from 'node:events';
 import { Readable } from 'node:stream';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { execFileSync } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
-import { checkUrl, download, extractVideoUrls, isPrivateAddress, MAX_VIDEO_BYTES, MAX_VIDEO_SECONDS, videoTitleFromUrl } from '../video.mjs';
+import { checkUrl, download, extractVideoUrls, findVideoCache, formatTranscript, isPrivateAddress, MAX_VIDEO_BYTES, MAX_VIDEO_SECONDS, parseTranscription, renderMindmap, runVideoJob, validateMindmap, videoTitleFromUrl } from '../video.mjs';
+
+test('regeneration reuses media and real timestamps, and falls back only when missing', async context => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'mdshare-cache-'));
+  const originalEnvironment = { ...process.env };
+  context.after(async () => {
+    for (const key of ['SUMMARY_BASE_URL', 'SUMMARY_API_KEY', 'ASR_BASE_URL', 'ASR_API_KEY', 'ASR_MODEL']) {
+      if (originalEnvironment[key] === undefined) delete process.env[key];
+      else process.env[key] = originalEnvironment[key];
+    }
+    await rm(directory, { recursive: true, force: true });
+  });
+  Object.assign(process.env, { SUMMARY_BASE_URL: 'https://model.example', SUMMARY_API_KEY: 'test', ASR_BASE_URL: 'https://model.example', ASR_API_KEY: 'test', ASR_MODEL: 'whisper-1' });
+  const folder = path.join(directory, 'attachments');
+  await mkdir(folder);
+  execFileSync('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'color=c=green:s=160x90:d=1', '-f', 'lavfi', '-i', 'anullsrc=r=16000:cl=mono', '-t', '1', '-c:v', 'mpeg4', '-c:a', 'aac', '-f', 'mp4', path.join(folder, 'video')]);
+  const timestamps = { version: 1, duration: 1, segments: [{ start: 0, end: 0.9, text: '测试内容' }], words: [] };
+  await writeFile(path.join(folder, 'transcript'), JSON.stringify(timestamps));
+  const video = { id: 'video', name: 'video', type: 'video/mp4' };
+  const transcript = { id: 'transcript', name: 'transcription.json', type: 'application/json' };
+  const calls = [];
+  context.mock.method(globalThis, 'fetch', async url => {
+    calls.push(url);
+    return new Response(JSON.stringify(url.endsWith('/audio/transcriptions') ? timestamps : { choices: [{ message: { content: JSON.stringify({ summary: '总结', mindmap: { label: '要点', time: 0.2 } }) } }] }));
+  });
+  const run = async cachedAttachments => {
+    const updates = [];
+    const saved = [];
+    await runVideoJob({ id: 'cache-test', url: 'http://127.0.0.1/unavailable.mp4' }, {
+      dataDir: directory, cachedAttachments,
+      update: async patch => { updates.push(patch); },
+      saveAttachment: async file => { saved.push(file); return { id: file.name, url: `/api/attachments/${file.name}` }; }
+    });
+    return { updates, saved, last: updates.at(-1) };
+  };
+  const cached = await run([video, transcript]);
+  assert.equal(cached.last.status, 'completed', cached.last.error);
+  assert.deepEqual(calls, ['https://model.example/chat/completions']);
+  assert.equal(cached.saved.some(item => ['video', 'transcription.json'].includes(item.name)), false);
+  assert.equal(cached.updates.some(item => item.status === 'downloading'), false);
+  assert.match(cached.last.markdown, /\/api\/attachments\/video/);
+  assert.ok((await readFile(path.join(folder, 'video'))).length);
+  calls.length = 0;
+  await writeFile(path.join(folder, 'transcript'), JSON.stringify({ text: '旧版无时间戳' }));
+  assert.equal((await findVideoCache(directory, [video, transcript])).transcription, undefined);
+  const legacy = await run([video, transcript]);
+  assert.equal(legacy.last.status, 'completed', legacy.last.error);
+  assert.deepEqual(calls, ['https://model.example/audio/transcriptions', 'https://model.example/chat/completions']);
+  assert.equal(legacy.saved.some(item => item.name === 'video'), false);
+  await rm(path.join(folder, 'video'));
+  calls.length = 0;
+  const missing = await run([video, transcript]);
+  assert.equal(missing.last.status, 'failed');
+  assert.ok(missing.updates.some(item => item.status === 'downloading'));
+  assert.deepEqual(calls, []);
+});
+
+test('mindmap embeds one image per leaf and rejects invalid capture times', () => {
+  const tree = validateMindmap({ label: '主题', children: [{ label: '<要点>', time: 1 }, { label: '分支', children: [{ label: '末节点', time: 4 }] }] }, 5);
+  const html = renderMindmap(tree, [{ url: '/api/attachments/first' }, { url: '/api/attachments/second' }]);
+  assert.equal((html.match(/<img /g) || []).length, 2);
+  assert.match(html, /&lt;要点&gt;/);
+  assert.ok(html.indexOf('/first') < html.indexOf('/second'));
+  for (const time of [-1, 5, NaN, undefined]) assert.throws(() => validateMindmap({ label: '无效', time }, 5));
+});
+
+test('transcriptions preserve model timestamps and reject missing or invalid timing', () => {
+  const result = parseTranscription({ segments: [{ start: 0.12, end: 3.45, text: ' 第一段。 ' }, { start: 4.5, end: 8.9, text: '第二段。' }], words: [{ start: 0.12, end: 0.8, word: '第一段' }] });
+  assert.equal(formatTranscript(result), '[00:00:00.120-00:00:03.450] 第一段。\n\n[00:00:04.500-00:00:08.900] 第二段。');
+  assert.deepEqual(result.words, [{ start: 0.12, end: 0.8, word: '第一段' }]);
+  for (const invalid of [{ text: '没有时间戳' }, { segments: [] }, { segments: [{ start: -1, end: 2, text: '错误' }] }, { segments: [{ start: 2, end: 1, text: '错误' }] }, { segments: [{ start: '0', end: 1, text: '错误' }] }]) assert.throws(() => parseTranscription(invalid), /ASR/);
+});
 
 test('video duration limit is twenty minutes', () => {
   assert.equal(MAX_VIDEO_SECONDS, 20 * 60);
+});
+
+test('video URL extraction accepts thirty unique URLs per batch', () => {
+  const urls = Array.from({ length: 31 }, (_, index) => `https://example.com/${index}.mp4`);
+  assert.deepEqual(extractVideoUrls(urls.slice(0, 30).join('\n')), urls.slice(0, 30));
+  assert.deepEqual(extractVideoUrls(urls.join('\n')), urls.slice(0, 30));
 });
 
 test('video note titles use decoded URL filenames without media extensions', () => {
