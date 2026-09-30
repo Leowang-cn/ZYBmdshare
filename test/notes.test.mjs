@@ -4,8 +4,52 @@ import { mkdtemp, rm, readdir, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { once } from 'node:events';
+import { promises as dns } from 'node:dns';
 import { createProbe } from '../server.mjs';
 import { unzipSync, strFromU8 } from 'fflate';
+
+test('video queue runs three jobs concurrently without duplicate claims', async context => {
+  const dataDir = await mkdtemp(path.join(os.tmpdir(), 'mdshare-concurrency-'));
+  const token = 'test-token-with-at-least-24-characters';
+  const previous = process.env.VIDEO_CONCURRENCY;
+  delete process.env.VIDEO_CONCURRENCY;
+  const releases = [];
+  let active = 0;
+  let maximum = 0;
+  context.mock.method(dns, 'lookup', async () => {
+    active += 1;
+    maximum = Math.max(maximum, active);
+    await new Promise(resolve => releases.push(resolve));
+    active -= 1;
+    return [{ address: '127.0.0.1', family: 4 }];
+  });
+  const notes = Array.from({ length: 4 }, (_, index) => ({ id: `note-${index}`, title: '测试', markdown: '', revision: 1, parentId: null }));
+  await writeFile(path.join(dataDir, 'notes.json'), JSON.stringify({ version: 1, notes, shares: [], attachments: [], videoJobs: notes.map(note => ({ id: note.id, noteId: note.id, status: 'queued', revision: 1, url: 'https://cache-test.example/video.mp4' })) }));
+  const server = await createProbe({ dataDir, token });
+  server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  const jobs = async () => (await (await fetch(`http://127.0.0.1:${server.address().port}/api/videos`, { headers: { Authorization: `Bearer ${token}` } })).json()).jobs;
+  try {
+    for (let attempt = 0; attempt < 100 && releases.length < 3; attempt++) await jobs();
+    assert.equal(releases.length, 3);
+    assert.equal((await jobs()).filter(job => job.status === 'queued').length, 1);
+    releases[0]();
+    for (let attempt = 0; attempt < 100 && releases.length < 4; attempt++) await jobs();
+    assert.equal(releases.length, 4);
+    releases.forEach(release => release());
+    for (let attempt = 0; attempt < 100; attempt++) {
+      if ((await jobs()).every(job => job.status === 'failed')) break;
+      if (attempt === 99) assert.fail('queue did not finish');
+    }
+    assert.equal(maximum, 3);
+    assert.equal(releases.length, 4);
+  } finally {
+    releases.forEach(release => release());
+    if (previous === undefined) delete process.env.VIDEO_CONCURRENCY;
+    else process.env.VIDEO_CONCURRENCY = previous;
+    await new Promise(resolve => server.close(resolve));
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
 
 test('video regeneration is atomic and preserves existing note titles and content on failure', async () => {
   const dataDir = await mkdtemp(path.join(os.tmpdir(), 'mdshare-regenerate-'));

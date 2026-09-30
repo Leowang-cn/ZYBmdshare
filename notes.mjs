@@ -82,14 +82,19 @@ export async function createNotes({ dataDir, token }) {
     return note;
   };
   const sessions = new Map();
+  const videoConcurrency = Number(process.env.VIDEO_CONCURRENCY || 3);
+  if (!Number.isInteger(videoConcurrency) || videoConcurrency < 1 || videoConcurrency > 10) throw new Error('VIDEO_CONCURRENCY 必须是 1-10 的整数');
+  const claimedVideos = new Set();
   let videoRunning = false;
   const runVideos = async () => {
     if (videoRunning) return;
     videoRunning = true;
     try {
+      await Promise.all(Array.from({ length: videoConcurrency }, async () => {
       let job;
-      while ((job = state.videoJobs.find(item => item.status === 'queued'))) {
+      while ((job = state.videoJobs.find(item => item.status === 'queued' && !claimedVideos.has(item.id)))) {
         const current = job;
+        claimedVideos.add(current.id);
         const staged = [];
         try {
           await runVideoJob(current, {
@@ -124,8 +129,10 @@ export async function createNotes({ dataDir, token }) {
           await mutate(database => { const record = database.videoJobs.find(item => item.id === current.id); if (record) { record.status = 'failed'; record.error = error instanceof Error ? error.message : '任务存储失败'; } });
         } finally {
           for (const attachment of staged) await unlink(path.join(dataDir, 'attachments', attachment.id)).catch(() => {});
+          claimedVideos.delete(current.id);
         }
       }
+      }));
     } finally { videoRunning = false; }
   };
   const attempts = new Map();

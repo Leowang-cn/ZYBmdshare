@@ -85,6 +85,12 @@ test('video duration limit is twenty minutes', () => {
   assert.equal(MAX_VIDEO_SECONDS, 20 * 60);
 });
 
+test('mindmap accepts explicit timestamp strings and distinguishes invalid times from leaf limits', () => {
+  for (const time of ['83.45', '00:01:23.450', '01:23.450']) assert.equal(validateMindmap({ label: '节点', time }, 100).time, 83.45);
+  for (const time of ['', null, '00:99:12', '12秒', 100, -1]) assert.throws(() => validateMindmap({ label: '节点', time }, 100), /节点时间无效/);
+  assert.throws(() => validateMindmap({ label: '根', children: Array.from({ length: 13 }, () => ({ label: '节点', time: 1 })) }, 100), /超过 12/);
+});
+
 test('ASR ignores blank segments and invalid optional words without inventing timestamps', () => {
   const segment = { start: 0.12, end: 2.34, text: '有效文字' };
   const parsed = parseTranscription({ segments: [{ text: '  ' }, segment], words: [null, { start: -1, end: 1, word: '错误' }, { start: 0.12, end: 0.4, word: '有效' }] });

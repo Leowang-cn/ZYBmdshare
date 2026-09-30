@@ -170,8 +170,15 @@ const mindmapLeaves = node => node.children?.length ? node.children.flatMap(mind
 export function validateMindmap(node, duration, depth = 0, budget = { count: 0, leaves: 0 }) {
   if (!node || typeof node.label !== 'string' || !node.label.trim() || node.label.length > 300 || depth > 4 || ++budget.count > 30) throw new Error('思维导图结构无效');
   if (Array.isArray(node.children) && node.children.length) return { label: node.label.trim(), children: node.children.map(child => validateMindmap(child, duration, depth + 1, budget)) };
-  if (!Number.isFinite(node.time) || node.time < 0 || node.time >= duration || ++budget.leaves > 12) throw new Error('思维导图末节点缺少有效关键帧时间');
-  return { label: node.label.trim(), time: node.time };
+  if (++budget.leaves > 12) throw new Error('思维导图末节点超过 12 个，请重试生成');
+  let time = node.time;
+  if (typeof time === 'string') {
+    const value = time.trim();
+    if (/^\d+(?:\.\d+)?$/.test(value)) time = Number(value);
+    else if (/^(?:\d+:)?[0-5]\d:[0-5]\d(?:\.\d+)?$/.test(value)) time = value.split(':').reduce((seconds, part) => seconds * 60 + Number(part), 0);
+  }
+  if (!Number.isFinite(time) || time < 0 || time >= duration) throw new Error(`思维导图末节点时间无效：${node.label.slice(0, 60)}；time=${JSON.stringify(node.time) ?? '缺失'}，要求 0 <= time < ${duration} 秒`);
+  return { label: node.label.trim(), time };
 }
 export function renderMindmap(node, images) {
   const escape = value => String(value).replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]);
