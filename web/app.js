@@ -1,7 +1,7 @@
 import { marked } from 'marked';
 import DOMPurify from 'dompurify';
 import katex from 'katex';
-import { createIcons, Plus, Download, LogOut, FilePlus, Paperclip, Share2, Trash2, Save, NotebookPen, X, PanelLeft, Ellipsis, MessageCircle, ArrowUp, Square } from 'lucide';
+import { createIcons, Plus, Download, LogOut, FilePlus, Paperclip, Share2, Trash2, Save, NotebookPen, X, PanelLeft, Ellipsis, MessageCircle, ArrowUp, Square, Copy, Video } from 'lucide';
 import { setupAI } from './ai.js';
 import { setupVideo } from './video.js';
 import 'katex/dist/katex.min.css';
@@ -15,7 +15,7 @@ let dirty = false;
 let rendering = 0;
 let timer;
 let busy = false;
-const icons = () => createIcons({ icons: { Plus, Download, LogOut, FilePlus, Paperclip, Share2, Trash2, Save, NotebookPen, X, PanelLeft, Ellipsis, MessageCircle, ArrowUp, Square } });
+const icons = () => createIcons({ icons: { Plus, Download, LogOut, FilePlus, Paperclip, Share2, Trash2, Save, NotebookPen, X, PanelLeft, Ellipsis, MessageCircle, ArrowUp, Square, Copy, Video } });
 icons();
 function notify(message) { element('toast').textContent = message; element('toast').hidden = false; clearTimeout(timer); timer = setTimeout(() => { element('toast').hidden = true; }, 6000); }
 async function api(route, method = 'GET', value) {
@@ -135,7 +135,23 @@ async function shareList() {
 }
 action('share', async () => { element('new-link').hidden = true; await shareList(); element('share-dialog').showModal(); });
 action('create-share', async () => { const pin = element('share-pin').value; const result = await api('/api/shares', 'POST', { noteId: selected.id, ...(pin ? { pin } : {}) }); element('share-url').value = new URL(result.url, location.origin).href; element('created-pin').textContent = result.pin; element('new-link').hidden = false; await shareList(); });
-action('copy-link', async () => { element('share-url').select(); try { await navigator.clipboard.writeText(element('share-url').value); notify('链接已复制'); } catch { notify('链接已选中，请复制'); } });
+action('copy-link', async () => {
+  const input = element('share-url');
+  try {
+    if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(input.value);
+    else throw new Error('clipboard API unavailable');
+    notify('链接已复制');
+  } catch {
+    const fallback = document.createElement('textarea');
+    fallback.value = input.value; fallback.setAttribute('readonly', '');
+    fallback.style.cssText = 'position:fixed;top:-9999px;left:-9999px;opacity:0';
+    document.body.append(fallback); fallback.select();
+    let copied = false;
+    try { copied = document.execCommand('copy'); } finally { fallback.remove(); }
+    if (copied) notify('链接已复制');
+    else { input.focus(); input.select(); notify('复制失败，请手动复制'); }
+  }
+});
 action('upload', () => element('file').click());
 element('file').onchange = async () => {
   const file = element('file').files[0]; element('file').value = ''; if (!file || !selected) return;
@@ -158,7 +174,7 @@ document.addEventListener('click', event => { if (!element('more').contains(even
 window.addEventListener('beforeunload', event => { if (dirty) { event.preventDefault(); event.returnValue = ''; } });
 document.addEventListener('keydown', event => { if ((event.ctrlKey || event.metaKey) && event.key === 's' && !shareToken) { event.preventDefault(); save().catch(error => notify(error.message)); } });
 if (!shareToken) setupAI({ element, api, notify, icons, getNotes: () => notes, getSelected: () => selected, isDirty: () => dirty, refresh: async note => { if (dirty || busy) { notes.push(note); tree(); } else await load(note.id); } });
-if (!shareToken) setupVideo({ api, notify, getSelected: () => selected, getMarkdown: () => element('editor').value, refresh: async id => { if (busy || dirty) throw new Error('请先保存当前笔记'); await load(id); } });
+if (!shareToken) setupVideo({ api, notify, icons, getSelected: () => selected, getMarkdown: () => element('editor').value, refresh: async id => { if (busy || dirty) throw new Error('请先保存当前笔记'); await load(id); } });
 if (shareToken) {
   document.body.classList.add('shared'); element('title').readOnly = true;
   for (const id of ['new-root', 'backup', 'logout', 'empty-create', 'parent-label']) element(id).hidden = true;

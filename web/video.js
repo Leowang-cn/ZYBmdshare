@@ -1,10 +1,13 @@
-export function setupVideo({ api, notify, getSelected, getMarkdown, refresh }) {
+export function setupVideo({ api, notify, icons, getSelected, getMarkdown, refresh }) {
   const button = document.createElement('button');
-  button.textContent = '视频任务';
+  button.title = '视频任务';
+  button.setAttribute('aria-label', '视频任务');
+  button.innerHTML = '<i data-lucide="video"></i>';
   document.querySelector('.actions').prepend(button);
   const dialog = document.createElement('dialog');
   dialog.innerHTML = '<form method="dialog"><header><h2>视频任务</h2><button aria-label="关闭">关闭</button></header></form><label>视频 URL<textarea rows="5" aria-label="视频 URL"></textarea></label><button class="primary" data-submit>开始处理</button><p role="status"></p><div data-jobs></div>';
   document.body.append(dialog);
+  icons();
   const input = dialog.querySelector('textarea');
   input.style.cssText = 'width:100%;resize:vertical';
   const submit = dialog.querySelector('[data-submit]');
