@@ -115,7 +115,7 @@ function notify(message) { element('toast').textContent = message; element('toas
 async function api(route, method = 'GET', value) {
   const response = await fetch(route, { method, headers: value === undefined ? {} : { 'Content-Type': 'application/json' }, body: value === undefined ? undefined : JSON.stringify(value) });
   const result = await response.json();
-  if (!response.ok) { if (response.status === 401) { element(shareToken ? 'pin-login' : 'login').hidden = false; element('workspace').hidden = true; } throw Object.assign(new Error(result.error || '请求失败'), { status: response.status }); }
+  if (!response.ok) { if (response.status === 401) { element(shareToken ? 'pin-login' : 'login').hidden = false; element('workspace').hidden = true; } throw Object.assign(new Error(result.error || result.message || '请求失败'), { status: response.status, result }); }
   return result;
 }
 function action(id, callback) { element(id).addEventListener('click', async () => { try { await callback(); } catch (error) { notify(error.message); } }); }

@@ -60,7 +60,11 @@ export class MediaUrlError extends Error {
     this.status = status;
   }
 }
-const publicHost = async hostname => {
+const publicHost = async (hostname, diagnostics) => {
+  if (diagnostics) {
+    diagnostics.hostname = hostname;
+    diagnostics.allowlistMatched = mediaPrivateHostAllowlist.has(hostname);
+  }
   if (hostname === 'localhost' || hostname.endsWith('.localhost') || hostname.endsWith('.local')) throw new MediaUrlError('音频/视频 URL 不允许访问本机地址，请使用公网地址', 'MEDIA_URL_PRIVATE_ADDRESS');
   if (isIP(hostname) && isPrivateAddress(hostname)) throw new MediaUrlError('音频/视频 URL 不允许访问内网或保留地址，请使用公网地址', 'MEDIA_URL_PRIVATE_ADDRESS');
   let records;
@@ -71,18 +75,33 @@ const publicHost = async hostname => {
     const code = typeof error?.code === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(error.code) ? error.code : 'UNKNOWN';
     throw new MediaUrlError(`音频/视频 URL DNS 解析失败（${code}，主机：${hostname}）；请检查服务端 DNS 和网络，稍后重试`, 'MEDIA_URL_DNS_LOOKUP_FAILED', code === 'EAI_AGAIN' ? 503 : 502);
   }
+  if (diagnostics) diagnostics.records = records.map(({ address, family }) => ({
+    address, family, private: isPrivateAddress(address),
+    allowed: !isPrivateAddress(address) || !!mediaPrivateHostAllowlist.get(hostname)?.has(address)
+  }));
   if (records.some(({ address }) => isPrivateAddress(address) && !mediaPrivateHostAllowlist.get(hostname)?.has(address))) throw new MediaUrlError('音频/视频 URL 不允许访问内网或保留地址（包括混合公网/内网 DNS 结果），请使用仅解析到公网的地址', 'MEDIA_URL_PRIVATE_ADDRESS');
   return records[0];
 };
-export const checkUrl = async value => {
+const validateMediaUrl = async (value, diagnostics) => {
   let url;
   if (typeof value !== 'string') throw new MediaUrlError('音频/视频 URL 无效，请提供有效的 HTTP(S) 地址', 'MEDIA_URL_INVALID');
   try { url = new URL(value); } catch { throw new MediaUrlError('音频/视频 URL 无效，请提供有效的 HTTP(S) 地址', 'MEDIA_URL_INVALID'); }
   if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) throw new MediaUrlError('音频/视频 URL 必须是无认证的 HTTP(S) 地址', 'MEDIA_URL_INVALID');
   if (value.length > 4096) throw new MediaUrlError('音频/视频 URL 过长（最多 4096 字符）', 'MEDIA_URL_INVALID');
-  const address = await publicHost(url.hostname.replace(/^\[|\]$/g, ''));
+  const address = await publicHost(url.hostname.replace(/^\[|\]$/g, ''), diagnostics);
   return { url, address };
 };
+export const checkUrl = value => validateMediaUrl(value);
+export async function diagnoseMediaUrl(value) {
+  const diagnostics = { hostname: null, records: [], allowlistMatched: false, address: null };
+  try {
+    const { address } = await validateMediaUrl(value, diagnostics);
+    return { ...diagnostics, address, ok: true, status: 200, code: 'MEDIA_URL_ALLOWED', message: '服务端 URL 校验通过；未下载媒体或检查重定向、格式与可用性' };
+  } catch (error) {
+    const safe = error instanceof MediaUrlError;
+    return { ...diagnostics, ok: false, status: safe ? error.status : 500, code: safe ? error.code : 'MEDIA_URL_CHECK_FAILED', message: safe ? error.message : '音频/视频 URL 校验失败，请稍后重试或联系管理员' };
+  }
+}
 export function mediaTitleFromUrl(value, fallback) {
   let filename;
   try {

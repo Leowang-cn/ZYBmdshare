@@ -5,7 +5,7 @@ export function setupVideo({ api, notify, icons, getSelected, getMarkdown, refre
   button.innerHTML = '<i data-lucide="video"></i>';
   document.querySelector('.actions').prepend(button);
   const dialog = document.createElement('dialog');
-  dialog.innerHTML = '<form method="dialog"><header><h2>音频/视频任务</h2><button aria-label="关闭">关闭</button></header></form><label>音频或视频 URL<textarea rows="5" aria-label="视频 URL"></textarea></label><button class="primary" data-submit>开始处理</button><p role="status"></p><div data-jobs></div>';
+  dialog.innerHTML = '<form method="dialog"><header><h2>音频/视频任务</h2><button aria-label="关闭">关闭</button></header></form><label>音频或视频 URL<textarea rows="5" aria-label="视频 URL"></textarea></label><button class="primary" data-submit>开始处理</button><button type="button" data-check>服务端检查 URL</button><p role="status"></p><pre data-diagnostics aria-live="polite" style="white-space:pre-wrap;overflow-wrap:anywhere"></pre><div data-jobs></div>';
   document.body.append(dialog);
   icons();
   const input = dialog.querySelector('textarea');
@@ -43,8 +43,21 @@ export function setupVideo({ api, notify, icons, getSelected, getMarkdown, refre
     if (!note) return notify('请先选择一篇笔记');
     parentId = note.id;
     input.value = [...new Set([...getMarkdown().matchAll(/https?:\/\/[^\s<>"'`()\[\]]+/g)].map(match => match[0]))].join('\n');
+    diagnostics.textContent = '';
     dialog.showModal();
     try { await update(); } catch (error) { notify(error.message); }
+  };
+  const check = dialog.querySelector('[data-check]');
+  const diagnostics = dialog.querySelector('[data-diagnostics]');
+  check.onclick = async () => {
+    const url = input.value.split(/\r?\n/).map(value => value.trim()).find(Boolean);
+    if (!url) return notify('请先输入一个 URL');
+    check.disabled = true; diagnostics.textContent = '检查中…';
+    try {
+      const result = await api('/api/media/check', 'POST', { url });
+      diagnostics.textContent = JSON.stringify(result, null, 2);
+    } catch (error) { diagnostics.textContent = error.result?.code ? JSON.stringify(error.result, null, 2) : error.message; }
+    finally { check.disabled = false; }
   };
   submit.onclick = async () => {
     submit.disabled = true;

@@ -4,7 +4,7 @@ import { createReadStream } from 'node:fs';
 import path from 'node:path';
 import { ZipFile } from 'yazl';
 import { answerNotes } from './ai.mjs';
-import { checkUrl, extractVideoUrls, runVideoJob, mediaTitleFromUrl, MediaUrlError } from './video.mjs';
+import { checkUrl, diagnoseMediaUrl, extractVideoUrls, runVideoJob, mediaTitleFromUrl, MediaUrlError } from './video.mjs';
 
 const digest = value => createHash('sha256').update(value).digest('hex');
 const fail = (status, message) => { throw Object.assign(new Error(message), { status }); };
@@ -154,7 +154,7 @@ export async function createNotes({ dataDir, token }) {
   void runVideos().catch(() => {});
   return async (request, response, url) => {
     const route = url.pathname;
-    if (!route.startsWith('/api/notes') && !route.startsWith('/api/shares') && !route.startsWith('/api/public/') && !route.startsWith('/api/session') && !route.startsWith('/api/attachments/') && route !== '/api/export' && route !== '/api/ai/chat' && route !== '/api/videos' && route !== '/api/videos/regenerate') return false;
+    if (!route.startsWith('/api/notes') && !route.startsWith('/api/shares') && !route.startsWith('/api/public/') && !route.startsWith('/api/session') && !route.startsWith('/api/attachments/') && route !== '/api/export' && route !== '/api/ai/chat' && route !== '/api/videos' && route !== '/api/videos/regenerate' && route !== '/api/media/check') return false;
     const send = (status, value, headers = {}) => {
       response.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', ...headers });
       response.end(JSON.stringify(value));
@@ -284,7 +284,11 @@ export async function createNotes({ dataDir, token }) {
       if (!bearer && !['GET', 'HEAD'].includes(request.method)) {
         if (!request.headers.origin || new URL(request.headers.origin).host !== request.headers.host) fail(403, 'Cross-origin request denied');
       }
-      if (route === '/api/videos' && request.method === 'GET') {
+      if (route === '/api/media/check' && request.method === 'POST') {
+        const input = await jsonBody(request);
+        const result = await diagnoseMediaUrl(input?.url);
+        send(result.ok ? 200 : result.status, result);
+      } else if (route === '/api/videos' && request.method === 'GET') {
         send(200, { jobs: state.videoJobs.filter(job => state.notes.some(note => note.id === job.noteId)).map(job => ({ ...job, title: getNote(state, job.noteId).title })) });
       } else if (route === '/api/videos/regenerate' && request.method === 'POST') {
         const input = await jsonBody(request);
