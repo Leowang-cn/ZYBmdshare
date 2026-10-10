@@ -8,7 +8,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
-import { checkUrl, download, extractVideoUrls, findVideoCache, formatTranscript, isPrivateAddress, MAX_VIDEO_BYTES, MAX_VIDEO_SECONDS, parseTranscription, renderMindmap, runVideoJob, validateMindmap, videoTitleFromUrl } from '../video.mjs';
+import { checkUrl, download, extractVideoUrls, findVideoCache, formatTranscript, isPrivateAddress, MAX_AUDIO_SECONDS, MAX_VIDEO_BYTES, MAX_VIDEO_SECONDS, mediaTitleFromUrl, offsetTranscription, parseTranscription, probeMedia, renderMindmap, runVideoJob, validateMindmap, videoTitleFromUrl } from '../video.mjs';
 
 test('regeneration reuses media and real timestamps, and falls back only when missing', async context => {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'mdshare-cache-'));
@@ -65,6 +65,37 @@ test('regeneration reuses media and real timestamps, and falls back only when mi
   assert.deepEqual(calls, []);
 });
 
+test('cached audio runs without screenshots and preserves audio source MIME', async context => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'mdshare-audio-job-'));
+  const originalEnvironment = { ...process.env };
+  context.after(async () => {
+    for (const key of ['SUMMARY_BASE_URL', 'SUMMARY_API_KEY', 'ASR_BASE_URL', 'ASR_API_KEY', 'ASR_MODEL']) originalEnvironment[key] === undefined ? delete process.env[key] : process.env[key] = originalEnvironment[key];
+    await rm(directory, { recursive: true, force: true });
+  });
+  Object.assign(process.env, { SUMMARY_BASE_URL: 'https://model.example', SUMMARY_API_KEY: 'test', ASR_BASE_URL: 'https://model.example', ASR_API_KEY: 'test', ASR_MODEL: 'whisper-1' });
+  const folder = path.join(directory, 'attachments');
+  await mkdir(folder);
+  execFileSync('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'sine=frequency=440:duration=1', '-c:a', 'aac', '-f', 'ipod', path.join(folder, 'source')]);
+  const cached = { id: 'source', name: 'audio-source', type: 'audio/mp4' };
+  const updates = [], saved = [];
+  context.mock.method(globalThis, 'fetch', async url => new Response(JSON.stringify(url.endsWith('/audio/transcriptions')
+    ? { segments: [{ start: 0, end: 0.9, text: '音频内容' }], words: [{ start: 0, end: 0.4, word: '音频' }] }
+    : { choices: [{ message: { content: JSON.stringify({ summary: '音频总结', mindmap: { label: '音频要点', time: 0.2, start: 0, end: 0.9 } }) } }] })));
+  await runVideoJob({ id: 'audio-cache-test', url: 'http://127.0.0.1/unavailable.m3a' }, {
+    dataDir: directory, cachedAttachments: [cached], update: async patch => updates.push(patch),
+    saveAttachment: async file => { saved.push(file); return { id: file.name, url: `/api/attachments/${file.name}` }; }
+  });
+  const result = updates.at(-1);
+  assert.equal(result.status, 'completed', result.error);
+  assert.equal(result.mediaKind, 'audio');
+  assert.equal(updates.some(item => item.status === 'downloading' || item.status === 'capturing'), false);
+  assert.equal(saved.some(item => item.type === 'image/jpeg'), false);
+  assert.match(result.markdown, /<audio controls/);
+  assert.doesNotMatch(result.markdown, /<video|<img/);
+  assert.match(result.markdown, /data-media-kind="audio"/);
+  assert.equal(result.attachments[0].type, 'audio/mp4');
+});
+
 test('mindmap embeds one image per leaf and rejects invalid capture times', () => {
   const tree = validateMindmap({ label: '主题', children: [{ label: '<要点>', time: 1 }, { label: '分支', children: [{ label: '末节点', time: 4 }] }] }, 5);
   const html = renderMindmap(tree, [{ url: '/api/attachments/first' }, { url: '/api/attachments/second' }]);
@@ -92,6 +123,39 @@ test('transcriptions preserve model timestamps and reject missing or invalid tim
   assert.equal(formatTranscript(result), '[00:00:00.120-00:00:03.450] 第一段。\n\n[00:00:04.500-00:00:08.900] 第二段。');
   assert.deepEqual(result.words, [{ start: 0.12, end: 0.8, word: '第一段' }]);
   for (const invalid of [{ text: '没有时间戳' }, { segments: [] }, { segments: [{ start: -1, end: 2, text: '错误' }] }, { segments: [{ start: 2, end: 1, text: '错误' }] }, { segments: [{ start: '0', end: 1, text: '错误' }] }]) assert.throws(() => parseTranscription(invalid), /ASR/);
+});
+
+test('media limits, titles, and chunk timestamps support audio without changing video', () => {
+  assert.equal(MAX_VIDEO_SECONDS, 20 * 60);
+  assert.equal(MAX_AUDIO_SECONDS, 2 * 60 * 60);
+  for (const extension of ['mp3', 'm4a', 'm3a', 'aac', 'wav', 'flac', 'ogg', 'opus', 'wma']) {
+    assert.equal(mediaTitleFromUrl(`https://example.com/lesson.${extension}`, 'fallback'), 'lesson');
+  }
+  const shifted = offsetTranscription({ segments: [{ start: 1, end: 2, text: '片段' }], words: [{ start: 1.1, end: 1.5, word: '片' }] }, 1200);
+  assert.deepEqual(shifted, { segments: [{ start: 1201, end: 1202, text: '片段' }], words: [{ start: 1201.1, end: 1201.5, word: '片' }] });
+  const audioMap = renderMindmap({ label: '音频', time: 2, start: 1, end: 3 });
+  assert.doesNotMatch(audioMap, /<img|src=/);
+  assert.match(audioMap, /data-media-kind="audio"/);
+  assert.match(audioMap, /data-time="2"/);
+});
+
+test('media probe recognizes audio formats and ignores attached cover art', async context => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'mdshare-audio-probe-'));
+  context.after(() => rm(directory, { recursive: true, force: true }));
+  for (const [extension, codec, expected] of [['mp3', 'libmp3lame', 'audio/mpeg'], ['m4a', 'aac', 'audio/mp4'], ['wav', 'pcm_s16le', 'audio/wav'], ['flac', 'flac', 'audio/flac'], ['ogg', 'libopus', 'audio/ogg'], ['wma', 'wmav2', 'audio/x-ms-wma']]) {
+    const file = path.join(directory, `sample.${extension}`);
+    execFileSync('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'sine=frequency=440:duration=0.2', '-c:a', codec, file]);
+    const metadata = await probeMedia(file);
+    assert.equal(metadata.kind, 'audio', extension);
+    assert.equal(metadata.mime, expected, extension);
+  }
+  const audio = path.join(directory, 'audio.mp3');
+  const cover = path.join(directory, 'cover.jpg');
+  const covered = path.join(directory, 'covered.mp3');
+  execFileSync('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'sine=frequency=440:duration=0.3', '-c:a', 'libmp3lame', audio]);
+  execFileSync('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'color=red:s=32x32', '-frames:v', '1', cover]);
+  execFileSync('ffmpeg', ['-v', 'error', '-i', audio, '-i', cover, '-map', '0:a', '-map', '1:v', '-c', 'copy', '-id3v2_version', '3', '-metadata:s:v', 'title=Album cover', '-metadata:s:v', 'comment=Cover (front)', covered]);
+  assert.equal((await probeMedia(covered)).kind, 'audio');
 });
 
 test('video duration limit is twenty minutes', () => {

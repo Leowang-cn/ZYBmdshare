@@ -6,8 +6,11 @@ import { spawn } from 'node:child_process';
 import { copyFile, mkdir, open, readFile, stat, unlink } from 'node:fs/promises';
 import path from 'node:path';
 
-export const MAX_VIDEO_BYTES = 512 * 1024 * 1024;
+export const MAX_MEDIA_BYTES = 512 * 1024 * 1024;
+export const MAX_VIDEO_BYTES = MAX_MEDIA_BYTES;
 export const MAX_VIDEO_SECONDS = 1200;
+export const MAX_AUDIO_SECONDS = 7200;
+export const ASR_CHUNK_SECONDS = 20 * 60;
 const MAX_REDIRECTS = 3;
 const MAX_URLS_PER_JOB = 30;
 const blockedAddresses = new BlockList();
@@ -42,15 +45,16 @@ export const checkUrl = async value => {
   const address = await publicHost(url.hostname.replace(/^\[|\]$/g, ''));
   return { url, address };
 };
-export function videoTitleFromUrl(value, fallback) {
+export function mediaTitleFromUrl(value, fallback) {
   let filename;
   try {
     filename = new URL(value).pathname.split('/').pop();
   } catch { return fallback; }
   try { filename = decodeURIComponent(filename); } catch {}
-  const title = filename.replace(/[\u0000-\u001f\u007f]/g, '').trim().replace(/\.(mp4|webm)$/i, '').trim();
+  const title = filename.replace(/[\u0000-\u001f\u007f]/g, '').trim().replace(/\.(mp4|webm|mp3|m4a|m3a|aac|wav|flac|ogg|opus|wma)$/i, '').trim();
   return title && !/^\.+$/.test(title) ? [...title].slice(0, 200).join('') : fallback;
 }
+export const videoTitleFromUrl = mediaTitleFromUrl;
 export function extractVideoUrls(markdown) {
   const urls = [...String(markdown || '').matchAll(/https?:\/\/[^\s<>"'`()\[\]]+/g)].map(match => match[0].replace(/[),.;!?]+$/, ''));
   return [...new Set(urls)].slice(0, MAX_URLS_PER_JOB);
@@ -104,17 +108,33 @@ export async function download(url, destination) {
   }
   throw new Error('视频下载失败');
 }
-async function probe(file) {
-  const { stdout } = await command(process.env.FFPROBE_BIN || 'ffprobe', ['-v', 'error', '-protocol_whitelist', 'file', '-show_entries', 'format=duration,format_name:stream=codec_type', '-of', 'json', file]);
+export async function probeMedia(file) {
+  const { stdout } = await command(process.env.FFPROBE_BIN || 'ffprobe', ['-v', 'error', '-protocol_whitelist', 'file', '-show_entries', 'format=duration,format_name:stream=codec_type,codec_name:stream_disposition=attached_pic', '-of', 'json', file]);
   const parsed = JSON.parse(stdout);
-  if (!parsed.streams?.some(stream => stream.codec_type === 'video')) throw new Error('文件没有视频轨道');
+  const streams = parsed.streams || [];
+  const hasAudio = streams.some(stream => stream.codec_type === 'audio');
+  const hasRealVideo = streams.some(stream => stream.codec_type === 'video' && Number(stream.disposition?.attached_pic || 0) !== 1);
+  if (!hasAudio && !hasRealVideo) throw new Error('文件没有可处理的音频或视频轨道');
   const info = parsed.format || {};
-  if (!/mov|mp4|webm/.test(info.format_name || '')) throw new Error('仅支持 MP4 和 WebM 视频');
+  const formatName = info.format_name || '';
+  const kind = hasRealVideo ? 'video' : 'audio';
+  if (kind === 'video' && !/mov|mp4|webm/.test(formatName)) throw new Error('仅支持 MP4 和 WebM 视频');
+  if (kind === 'audio' && !/mp3|mov|mp4|m4a|aac|wav|flac|ogg|opus|asf/.test(formatName)) throw new Error('不支持此音频格式');
   const duration = Number(info.duration);
-  if (!Number.isFinite(duration) || duration <= 0) throw new Error('无法读取视频时长');
-  if (duration > MAX_VIDEO_SECONDS) throw new Error('视频时长超过 20 分钟限制');
-  return { duration, format: info.format_name || 'video/mp4' };
+  if (!Number.isFinite(duration) || duration <= 0) throw new Error(`无法读取${kind === 'video' ? '视频' : '音频'}时长`);
+  const limit = kind === 'video' ? MAX_VIDEO_SECONDS : MAX_AUDIO_SECONDS;
+  if (duration > limit) throw new Error(`${kind === 'video' ? '视频时长超过 20 分钟' : '音频时长超过 2 小时'}限制`);
+  const mime = kind === 'video'
+    ? (formatName.includes('webm') ? 'video/webm' : 'video/mp4')
+    : formatName.includes('mp3') ? 'audio/mpeg'
+      : /mov|mp4|m4a/.test(formatName) ? 'audio/mp4'
+        : formatName.includes('wav') ? 'audio/wav'
+          : formatName.includes('flac') ? 'audio/flac'
+            : /ogg|opus/.test(formatName) ? 'audio/ogg'
+              : formatName.includes('asf') ? 'audio/x-ms-wma' : 'audio/aac';
+  return { duration, format: formatName, kind, mime };
 }
+const probe = probeMedia;
 export function parseTranscription(result) {
   if (!Array.isArray(result.segments) || !result.segments.length) throw new Error('ASR 未返回分段时间戳，请使用支持 verbose_json 的转写模型');
   const validate = (items, field) => items.flatMap((item, index) => {
@@ -133,7 +153,7 @@ export function parseTranscription(result) {
   const words = validate(Array.isArray(result.words) ? result.words : [], 'word');
   return { segments, words, text: segments.map(segment => segment.text).join('\n') };
 }
-export async function transcribe(audio, filename) {
+export async function transcribe(audio, filename, type = 'audio/mpeg') {
   const base = process.env.ASR_BASE_URL;
   const key = process.env.ASR_API_KEY || process.env.AI_API_KEY;
   if (!base || !key) throw new Error('未配置 ASR_BASE_URL 或转写密钥（ASR_API_KEY / AI_API_KEY）');
@@ -141,7 +161,7 @@ export async function transcribe(audio, filename) {
     throw new Error('当前 Qwen 转写接口未提供真实时间戳，请将 ASR_MODEL 改为 whisper-1，并配置对应的 ASR_BASE_URL');
   }
   const form = new FormData();
-  form.set('file', new File([await (await import('node:fs/promises')).readFile(audio)], filename, { type: 'audio/mpeg' }));
+  form.set('file', new File([await (await import('node:fs/promises')).readFile(audio)], filename, { type }));
   form.set('model', process.env.ASR_MODEL || 'whisper-1');
   form.set('response_format', 'verbose_json');
   form.append('timestamp_granularities[]', 'segment');
@@ -151,18 +171,48 @@ export async function transcribe(audio, filename) {
   if (!response.ok) throw new Error(`ASR 失败（HTTP ${response.status}）`);
   return parseTranscription(JSON.parse(body));
 }
+export const offsetTranscription = (transcription, offset) => ({
+  segments: transcription.segments.map(item => ({ ...item, start: item.start + offset, end: item.end + offset })),
+  words: transcription.words.map(item => ({ ...item, start: item.start + offset, end: item.end + offset }))
+});
+export async function transcribeInChunks(audio, duration, work, onProgress = async () => {}) {
+  const parts = [];
+  const chunkCount = Math.ceil(duration / ASR_CHUNK_SECONDS);
+  for (let index = 0; index < chunkCount; index += 1) {
+    const start = index * ASR_CHUNK_SECONDS;
+    const length = Math.min(ASR_CHUNK_SECONDS, duration - start);
+    const chunk = path.join(work, `asr-${index + 1}.mp3`);
+    await command(process.env.FFMPEG_BIN || 'ffmpeg', ['-y', '-protocol_whitelist', 'file', '-threads', '2', '-ss', String(start), '-t', String(length), '-i', audio, '-vn', '-ac', '1', '-ar', '16000', '-c:a', 'libmp3lame', '-b:a', '64k', chunk]);
+    parts.push(offsetTranscription(await transcribe(chunk, `audio-${index + 1}.mp3`), start));
+    await onProgress(index + 1, chunkCount);
+  }
+  const segments = parts.flatMap(part => part.segments);
+  const words = parts.flatMap(part => part.words);
+  return { segments, words, text: segments.map(segment => segment.text).join('\n') };
+}
 const formatTime = seconds => new Date(Math.max(0, Number(seconds) || 0) * 1000).toISOString().slice(11, 19);
 export const formatTranscript = transcription => transcription.segments.map(segment => `[${new Date(segment.start * 1000).toISOString().slice(11, 23)}-${new Date(segment.end * 1000).toISOString().slice(11, 23)}] ${segment.text}`).join('\n\n');
-async function summarize(transcript, duration) {
-  transcript = `输出要求：每个末节点除截图 time 外，还必须返回数字 start 和 end，表示该要点对应内容的起止秒数，依据下方真实逐字稿，满足 0 <= start <= time <= end <= 视频时长，且 start < end。不要为凑节点数量拆分内容。\n${transcript}`;
-  if (transcript.startsWith('（当前转写模型未提供时间戳）')) transcript = `此逐字稿没有时间信息，无法可靠定位关键帧。请返回空 keyframes 数组，不要猜测内容出现的时间。\n${transcript}`;
+async function summaryRequest(base, key, body) {
+  const response = await fetch(`${base.replace(/\/$/, '')}/chat/completions`, { method: 'POST', headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal: AbortSignal.timeout(5 * 60 * 1000) });
+  const text = await response.text();
+  if (!response.ok) throw new Error(`媒体总结失败（HTTP ${response.status}）`);
+  return JSON.parse(text).choices?.[0]?.message?.content || '{}';
+}
+async function summarize(transcript, duration, kind = 'video') {
+  const noun = kind === 'audio' ? '音频' : '视频';
   const base = process.env.SUMMARY_BASE_URL || process.env.AI_BASE_URL;
   const key = process.env.SUMMARY_API_KEY || process.env.AI_API_KEY;
   if (!base || !key) throw new Error('未配置总结模型服务');
-  const response = await fetch(`${base.replace(/\/$/, '')}/chat/completions`, { method: 'POST', headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ model: process.env.SUMMARY_MODEL || process.env.AI_MODEL, temperature: 0.2, response_format: { type: 'json_object' }, messages: [{ role: 'system', content: '你是视频内容分析器。只返回 JSON：{"summary":"中文核心总结","mindmap":{"label":"视频主题","children":[{"label":"主题分支","children":[{"label":"具体内容要点","time":12.34,"start":10.2,"end":18.7}]}]}}。根据逐字稿组织视频内容的思维导图，最多5层、50个节点，建议不超过12个末节点。每个末节点必须提供对应内容在原视频中的 time、start、end 秒数，依据真实逐字稿时间，满足 start <= time <= end。每个末节点会内嵌该 time 截取的关键帧图片。非末节点使用 children，末节点使用 time、start、end。你没有看到视频画面，不要编造视觉细节。' }, { role: 'user', content: `视频时长 ${duration.toFixed(1)} 秒。以下是带时间戳的逐字稿：\n${transcript.slice(0, 100000)}` }] }), signal: AbortSignal.timeout(5 * 60 * 1000) });
-  const body = await response.text();
-  if (!response.ok) throw new Error(`视频总结失败（HTTP ${response.status}）`);
-  const content = JSON.parse(body).choices?.[0]?.message?.content || '{}';
+  let source = transcript;
+  if (source.length > 90000) {
+    const chunks = source.match(/[\s\S]{1,80000}/g) || [];
+    const digests = [];
+    for (let index = 0; index < chunks.length; index += 1) digests.push(await summaryRequest(base, key, { model: process.env.SUMMARY_MODEL || process.env.AI_MODEL, temperature: 0.1, messages: [{ role: 'system', content: `忠实压缩带时间戳的${noun}逐字稿，保留所有主题、关键事实和时间范围，不要输出 JSON。` }, { role: 'user', content: `第 ${index + 1}/${chunks.length} 部分：\n${chunks[index]}` }] }));
+    source = `以下是覆盖完整逐字稿的分段摘要：\n${digests.join('\n\n')}`;
+  }
+  source = `输出要求：每个末节点必须返回数字 time、start 和 end，表示该要点对应内容的定位秒数及起止秒数，依据真实时间信息，满足 0 <= start <= time <= end <= ${noun}时长，且 start < end。不要为凑节点数量拆分内容。\n${source}`;
+  const system = `你是${noun}内容分析器。只返回 JSON：{"summary":"中文核心总结","mindmap":{"label":"${noun}主题","children":[{"label":"主题分支","children":[{"label":"具体内容要点","time":12.34,"start":10.2,"end":18.7}]}]}}。根据逐字稿组织思维导图，最多5层、50个节点，建议不超过12个末节点。每个末节点必须提供 time、start、end 秒数。非末节点使用 children。你没有获得画面信息，不要编造视觉细节。`;
+  const content = await summaryRequest(base, key, { model: process.env.SUMMARY_MODEL || process.env.AI_MODEL, temperature: 0.2, response_format: { type: 'json_object' }, messages: [{ role: 'system', content: system }, { role: 'user', content: `${noun}时长 ${duration.toFixed(1)} 秒。以下内容覆盖完整逐字稿：\n${source}` }] });
   const result = JSON.parse(content);
   const mindmap = validateMindmap(result.mindmap, duration);
   return { summary: String(result.summary || ''), mindmap, keyframes: mindmapLeaves(mindmap) };
@@ -184,11 +234,16 @@ export function validateMindmap(node, duration, depth = 0, budget = { count: 0 }
   if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || end <= start || end > duration || time < start || time > end) return { label: node.label.trim(), time };
   return { label: node.label.trim(), time, start, end };
 }
-export function renderMindmap(node, images) {
+export function renderMindmap(node, images = null) {
   const escape = value => String(value).replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]);
   let index = 0;
-  const branch = item => `<li${Number.isFinite(item.start) && Number.isFinite(item.end) ? ` data-start="${item.start}" data-end="${item.end}"` : ''}><span>${escape(item.label)}</span>${item.children?.length ? `<ul>${item.children.map(branch).join('')}</ul>` : `<figure><img src="${escape(images[index++].url)}" alt="${escape(item.label)}"><figcaption>${formatTime(item.time)}</figcaption></figure>`}</li>`;
-  return `<div class="video-mindmap"><ul>${branch(node)}</ul></div>`;
+  const branch = item => {
+    const range = Number.isFinite(item.start) && Number.isFinite(item.end) ? ` data-start="${item.start}" data-end="${item.end}"` : '';
+    if (item.children?.length) return `<li${range}><span>${escape(item.label)}</span><ul>${item.children.map(branch).join('')}</ul></li>`;
+    const image = images?.[index++];
+    return `<li${range} data-time="${item.time}"><span>${escape(item.label)}</span><figure>${image ? `<img src="${escape(image.url)}" alt="${escape(item.label)}">` : ''}<figcaption>${formatTime(item.time)}</figcaption></figure></li>`;
+  };
+  return `<div class="video-mindmap" data-media-kind="${images ? 'video' : 'audio'}"><ul>${branch(node)}</ul></div>`;
 }
 export async function findVideoCache(dataDir, attachments) {
   const cache = {};
@@ -199,9 +254,9 @@ export async function findVideoCache(dataDir, attachments) {
       const info = await stat(file);
       if (!info.isFile() || !info.size) continue;
       const attachment = { ...item, url: `/api/attachments/${item.id}` };
-      if (!cache.video && item.name === 'video' && ['video/mp4', 'video/webm'].includes(item.type) && info.size <= MAX_VIDEO_BYTES) cache.video = { file, attachment };
+      if (!cache.media && ((item.name === 'video' && ['video/mp4', 'video/webm'].includes(item.type)) || (item.name === 'audio-source' && item.type.startsWith('audio/'))) && info.size <= MAX_VIDEO_BYTES) cache.media = { file, attachment };
       if (!cache.audio && item.name === '音频.wav' && item.type === 'audio/wav') cache.audio = { file, attachment };
-      if (!cache.transcription && item.name === 'transcription.json' && item.type === 'application/json' && info.size <= 10 * 1024 * 1024) {
+      if (!cache.transcription && item.name === 'transcription.json' && item.type === 'application/json' && info.size <= 64 * 1024 * 1024) {
         const result = JSON.parse(await readFile(file, 'utf8'));
         if (result.version !== 1 || !Number.isFinite(result.duration) || result.duration <= 0) continue;
         cache.transcription = { attachment, duration: result.duration, value: parseTranscription(result) };
@@ -215,63 +270,57 @@ export async function runVideoJob(job, { dataDir, saveAttachment, update, cached
   await mkdir(work, { recursive: true, mode: 0o700 });
   const source = path.join(work, 'source');
   const audio = path.join(work, 'audio.wav');
-  const transcriptionAudio = path.join(work, 'transcription.mp3');
   try {
     const cache = await findVideoCache(dataDir, cachedAttachments);
     let metadata;
-    if (cache.video) {
+    if (cache.media) {
       await update({ status: 'checking', progress: 25 });
-      try {
-        await copyFile(cache.video.file, source);
-        metadata = await probe(source);
-      } catch {
-        await unlink(source).catch(() => {});
-        delete cache.video;
-      }
+      try { await copyFile(cache.media.file, source); metadata = await probe(source); }
+      catch { await unlink(source).catch(() => {}); delete cache.media; }
     }
-    if (!cache.video) {
-      delete cache.audio;
-      delete cache.transcription;
+    if (!cache.media) {
+      delete cache.audio; delete cache.transcription;
       await update({ status: 'downloading', progress: 10 });
       const downloaded = await download(job.url, source);
       await update({ status: 'checking', progress: 25, bytes: downloaded.size, finalUrl: downloaded.url });
       metadata = await probe(source);
     }
     if (cache.transcription && Math.abs(cache.transcription.duration - metadata.duration) > 0.1) delete cache.transcription;
-    await update({ status: 'transcribing', progress: 40, duration: metadata.duration });
+    await update({ status: 'transcribing', progress: 35, duration: metadata.duration, mediaKind: metadata.kind, mime: metadata.mime });
     if (!cache.audio) await command(process.env.FFMPEG_BIN || 'ffmpeg', ['-y', '-protocol_whitelist', 'file', '-threads', '2', '-i', source, '-vn', '-ac', '1', '-ar', '16000', '-c:a', 'pcm_s16le', audio]);
     let transcription = cache.transcription?.value;
-    if (!transcription) {
-      await command(process.env.FFMPEG_BIN || 'ffmpeg', ['-y', '-protocol_whitelist', 'file', '-threads', '2', '-i', cache.audio?.file || audio, '-c:a', 'libmp3lame', '-b:a', '64k', transcriptionAudio]);
-      transcription = await transcribe(transcriptionAudio, 'audio.mp3');
-    }
+    if (!transcription) transcription = await transcribeInChunks(cache.audio?.file || audio, metadata.duration, work, async (done, total) => update({ status: 'transcribing', progress: 35 + Math.floor(done / total * 20), asrChunks: total, asrChunk: done }));
     const transcript = formatTranscript(transcription);
     await update({ status: 'summarizing', progress: 60 });
-    const analysis = await summarize(transcript, metadata.duration);
-    await update({ status: 'capturing', progress: 75 });
+    const analysis = await summarize(transcript, metadata.duration, metadata.kind);
     const screenshots = [];
-    for (let index = 0; index < analysis.keyframes.length; index += 1) {
-      const item = analysis.keyframes[index];
-      const image = path.join(work, `keyframe-${index + 1}.jpg`);
-      await command(process.env.FFMPEG_BIN || 'ffmpeg', ['-y', '-protocol_whitelist', 'file', '-threads', '2', '-ss', String(Math.min(Number(item.time), metadata.duration - 0.1)), '-i', source, '-frames:v', '1', '-vf', 'scale=1280:-2', '-q:v', '3', image]);
-      screenshots.push({ path: image, name: `关键帧-${index + 1}.jpg`, time: item.time, description: item.label });
+    if (metadata.kind === 'video') {
+      await update({ status: 'capturing', progress: 75 });
+      for (let index = 0; index < analysis.keyframes.length; index += 1) {
+        const item = analysis.keyframes[index], image = path.join(work, `keyframe-${index + 1}.jpg`);
+        await command(process.env.FFMPEG_BIN || 'ffmpeg', ['-y', '-protocol_whitelist', 'file', '-threads', '2', '-ss', String(Math.min(Number(item.time), metadata.duration - 0.1)), '-i', source, '-frames:v', '1', '-vf', 'scale=1280:-2', '-q:v', '3', image]);
+        screenshots.push({ path: image, name: `关键帧-${index + 1}.jpg`, time: item.time, description: item.label });
+      }
     }
     await update({ status: 'saving', progress: 90 });
-    const video = cache.video?.attachment || await saveAttachment({ path: source, name: 'video', type: metadata.format.includes('webm') ? 'video/webm' : 'video/mp4' });
-    const audioAttachment = cache.audio?.attachment || await saveAttachment({ path: audio, name: '音频.wav', type: 'audio/wav' });
+    const sourceAttachment = cache.media?.attachment || await saveAttachment({ path: source, name: metadata.kind === 'video' ? 'video' : 'audio-source', type: metadata.mime });
+    let audioAttachment = cache.audio?.attachment;
+    if (!audioAttachment) {
+      if (cache.media) await copyFile(audio, path.join(work, 'audio-save.wav'));
+      audioAttachment = await saveAttachment({ path: cache.media ? path.join(work, 'audio-save.wav') : audio, name: '音频.wav', type: 'audio/wav' });
+    }
     const transcriptionFile = path.join(work, 'transcription.json');
     await (await import('node:fs/promises')).writeFile(transcriptionFile, JSON.stringify({ version: 1, model: process.env.ASR_MODEL || 'whisper-1', duration: metadata.duration, ...transcription }), { mode: 0o600 });
     const transcriptionAttachment = cache.transcription?.attachment || await saveAttachment({ path: transcriptionFile, name: 'transcription.json', type: 'application/json' });
     const imageAttachments = [];
     for (const screenshot of screenshots) imageAttachments.push({ ...await saveAttachment({ path: screenshot.path, name: screenshot.name, type: 'image/jpeg' }), time: screenshot.time, description: screenshot.description });
-    const illustrated = renderMindmap(analysis.mindmap, imageAttachments);
-    const markdown = ['## 原视频：', `<video controls src="${video.url}"></video>`, '## 核心总结：', analysis.summary, '## 思维导图：', illustrated, '## 真的时间戳-逐字稿：', transcript, `[下载时间戳数据](${transcriptionAttachment.url})`, '## 音频：', `[audio](${audioAttachment.url})`].join('\n\n');
-    await update({ status: 'completed', progress: 100, markdown, attachments: [video, audioAttachment, transcriptionAttachment, ...imageAttachments] });
+    const illustrated = renderMindmap(analysis.mindmap, metadata.kind === 'video' ? imageAttachments : null);
+    const media = metadata.kind === 'video' ? ['## 原视频：', `<video controls src="${sourceAttachment.url}"></video>`] : ['## 原音频：', `<audio controls src="${sourceAttachment.url}"></audio>`];
+    const markdown = [...media, '## 核心总结：', analysis.summary, '## 思维导图：', illustrated, '## 真的时间戳-逐字稿：', transcript, `[下载时间戳数据](${transcriptionAttachment.url})`, '## 音频：', `[audio](${audioAttachment.url})`].join('\n\n');
+    await update({ status: 'completed', progress: 100, markdown, mediaKind: metadata.kind, mime: metadata.mime, attachments: [sourceAttachment, audioAttachment, transcriptionAttachment, ...imageAttachments] });
   } catch (error) {
-    await update({ status: 'failed', progress: 100, error: error instanceof Error ? error.message : '视频任务失败' });
+    await update({ status: 'failed', progress: 100, error: error instanceof Error ? error.message : '媒体任务失败' });
   } finally {
-    await unlink(source).catch(() => {});
-    await unlink(audio).catch(() => {});
     const { rm } = await import('node:fs/promises');
     await rm(work, { recursive: true, force: true }).catch(() => {});
   }

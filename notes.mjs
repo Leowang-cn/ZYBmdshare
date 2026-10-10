@@ -4,7 +4,7 @@ import { createReadStream } from 'node:fs';
 import path from 'node:path';
 import { ZipFile } from 'yazl';
 import { answerNotes } from './ai.mjs';
-import { checkUrl, extractVideoUrls, runVideoJob, videoTitleFromUrl } from './video.mjs';
+import { checkUrl, extractVideoUrls, runVideoJob, mediaTitleFromUrl } from './video.mjs';
 
 const digest = value => createHash('sha256').update(value).digest('hex');
 const fail = (status, message) => { throw Object.assign(new Error(message), { status }); };
@@ -288,11 +288,11 @@ export async function createNotes({ dataDir, token }) {
         send(200, { jobs: state.videoJobs.filter(job => state.notes.some(note => note.id === job.noteId)).map(job => ({ ...job, title: getNote(state, job.noteId).title })) });
       } else if (route === '/api/videos/regenerate' && request.method === 'POST') {
         const input = await jsonBody(request);
-        if (!Array.isArray(input.noteIds) || !input.noteIds.length || input.noteIds.length > 30 || input.noteIds.some(id => typeof id !== 'string') || new Set(input.noteIds).size !== input.noteIds.length) fail(400, '请选择 1-30 篇视频笔记');
+        if (!Array.isArray(input.noteIds) || !input.noteIds.length || input.noteIds.length > 30 || input.noteIds.some(id => typeof id !== 'string') || new Set(input.noteIds).size !== input.noteIds.length) fail(400, '请选择 1-30 篇音频/视频笔记');
         const jobs = await mutate(database => {
           const targets = input.noteIds.map(id => {
             const note = getNote(database, id);
-            const job = database.videoJobs.find(item => item.noteId === id) || fail(400, '所选笔记不是视频解析笔记');
+            const job = database.videoJobs.find(item => item.noteId === id) || fail(400, '所选笔记不是音频/视频解析笔记');
             if (!['completed', 'failed'].includes(job.status)) fail(409, '所选笔记正在处理中');
             return { note, job };
           });
@@ -310,14 +310,15 @@ export async function createNotes({ dataDir, token }) {
         else if (request.method === 'POST') {
           const input = await jsonBody(request);
           const urls = input.urls ?? extractVideoUrls(parent.markdown);
-          if (!Array.isArray(urls) || !urls.length || urls.length > 30 || urls.some(url => typeof url !== 'string')) fail(400, '需要 1-30 个视频 URL');
-          try { for (const url of urls) await checkUrl(url); } catch { fail(400, '视频 URL 无效或指向内网、保留地址'); }
+          if (!Array.isArray(urls) || !urls.length || urls.length > 30 || urls.some(url => typeof url !== 'string')) fail(400, '需要 1-30 个音频/视频 URL');
+          try { for (const url of urls) await checkUrl(url); } catch { fail(400, '音频/视频 URL 无效或指向内网、保留地址'); }
           const jobs = await mutate(database => {
             getNote(database, parentId);
             if (database.videoJobs.filter(job => !['completed', 'failed'].includes(job.status)).length + urls.length > 30) fail(429, '最多同时排队 30 个视频');
             if (database.videoJobs.length + urls.length > 1000) fail(409, '视频任务数量已达上限');
             return [...new Set(urls)].map((url, index) => {
-              const note = addNote(database, { title: videoTitleFromUrl(url, `${parent.title.slice(0, 160)} - 视频 ${index + 1}`), parentId, markdown: '视频处理中。' });
+              const fallback = `${parent.title.slice(0, 160)} - 媒体 ${index + 1}`;
+              const note = addNote(database, { title: mediaTitleFromUrl(url, fallback), parentId, markdown: '音频/视频处理中。' });
               const job = { id: randomUUID(), parentId, noteId: note.id, revision: note.revision, url, status: 'queued', progress: 0, createdAt: new Date().toISOString() };
               database.videoJobs.push(job); return job;
             });

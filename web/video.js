@@ -1,11 +1,11 @@
 export function setupVideo({ api, notify, icons, getSelected, getMarkdown, refresh, hasUnsaved }) {
   const button = document.createElement('button');
-  button.title = '视频任务';
-  button.setAttribute('aria-label', '视频任务');
+  button.title = '音频/视频任务';
+  button.setAttribute('aria-label', '音频/视频任务');
   button.innerHTML = '<i data-lucide="video"></i>';
   document.querySelector('.actions').prepend(button);
   const dialog = document.createElement('dialog');
-  dialog.innerHTML = '<form method="dialog"><header><h2>视频任务</h2><button aria-label="关闭">关闭</button></header></form><label>视频 URL<textarea rows="5" aria-label="视频 URL"></textarea></label><button class="primary" data-submit>开始处理</button><p role="status"></p><div data-jobs></div>';
+  dialog.innerHTML = '<form method="dialog"><header><h2>音频/视频任务</h2><button aria-label="关闭">关闭</button></header></form><label>音频或视频 URL<textarea rows="5" aria-label="视频 URL"></textarea></label><button class="primary" data-submit>开始处理</button><p role="status"></p><div data-jobs></div>';
   document.body.append(dialog);
   icons();
   const input = dialog.querySelector('textarea');
@@ -62,7 +62,7 @@ export function setupVideo({ api, notify, icons, getSelected, getMarkdown, refre
   document.querySelector('.actions').prepend(regenerate);
   const batch = document.createElement('dialog');
   batch.className = 'video-regenerate';
-  batch.innerHTML = '<form method="dialog"><header><h2>重新生成视频笔记</h2><button aria-label="关闭"><i data-lucide="x"></i></button></header></form><input type="search" aria-label="搜索视频笔记" placeholder="搜索视频笔记"><label><input type="checkbox" data-all>全选当前结果</label><div data-list></div><p role="status"></p><button class="primary" data-regenerate>重新生成</button>';
+  batch.innerHTML = '<form method="dialog"><header><h2>重新生成音频/视频笔记</h2><button aria-label="关闭"><i data-lucide="x"></i></button></header></form><input type="search" aria-label="搜索音频/视频笔记" placeholder="搜索音频/视频笔记"><label><input type="checkbox" data-all>全选当前结果</label><div data-list></div><p role="status"></p><button class="primary" data-regenerate>重新生成</button>';
   document.body.append(batch); icons();
   const selection = new Set();
   const search = batch.querySelector('[type="search"]');
@@ -90,7 +90,7 @@ export function setupVideo({ api, notify, icons, getSelected, getMarkdown, refre
     selectAll.checked = candidates.length > 0 && candidates.every(job => selection.has(job.noteId));
     selectAll.indeterminate = !selectAll.checked && candidates.some(job => selection.has(job.noteId));
     apply.disabled = selection.size === 0 || selection.size > 30;
-    batch.querySelector('[role="status"]').textContent = jobs.length ? `已选 ${selection.size} 篇（每批最多 30 篇）` : '暂无视频解析笔记';
+    batch.querySelector('[role="status"]').textContent = jobs.length ? `已选 ${selection.size} 篇（每批最多 30 篇）` : '暂无音频/视频解析笔记';
   };
   const poll = async () => {
     clearTimeout(batchTimer);
@@ -109,7 +109,7 @@ export function setupVideo({ api, notify, icons, getSelected, getMarkdown, refre
   selectAll.onchange = () => { for (const job of visibleJobs().filter(available)) { if (selectAll.checked) selection.add(job.noteId); else selection.delete(job.noteId); } draw(); };
   apply.onclick = async () => {
     if (hasUnsaved()) return notify('请先保存当前笔记');
-    if (!selection.size || selection.size > 30 || !confirm(`重新生成选中的 ${selection.size} 篇视频笔记？成功后将替换原正文，标题不变；原正文中的手动修改也会被替换。`)) return;
+    if (!selection.size || selection.size > 30 || !confirm(`重新生成选中的 ${selection.size} 篇音频/视频笔记？成功后将替换原正文，标题不变；原正文中的手动修改也会被替换。`)) return;
     apply.disabled = true;
     try { await api('/api/videos/regenerate', 'POST', { noteIds: [...selection] }); selection.clear(); notify('已加入重新生成队列'); await poll(); }
     catch (error) { notify(error.message); draw(); }

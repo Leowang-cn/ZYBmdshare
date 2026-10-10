@@ -10,12 +10,12 @@ export function enhanceMindmaps(preview) {
     const match = /^\[(\d{2}:\d{2}:\d{2}\.\d{3})-(\d{2}:\d{2}:\d{2}\.\d{3})\]/.exec(paragraph.textContent);
     return match ? [{ start: toSeconds(match[1]), end: toSeconds(match[2]), text: paragraph.textContent }] : [];
   });
-  const seekVideo = seconds => {
-    const video = preview.querySelector('video');
-    if (!video) return;
-    const seek = () => { video.currentTime = seconds; video.scrollIntoView({ block: 'center', behavior: 'smooth' }); };
-    if (video.readyState) seek();
-    else { video.addEventListener('loadedmetadata', seek, { once: true }); video.load(); }
+  const seekMedia = seconds => {
+    const media = preview.querySelector('video, audio');
+    if (!media) return;
+    const seek = () => { media.currentTime = seconds; media.scrollIntoView({ block: 'center', behavior: 'smooth' }); };
+    if (media.readyState) seek();
+    else { media.addEventListener('loadedmetadata', seek, { once: true }); media.load(); }
   };
   for (const source of preview.querySelectorAll('.video-mindmap')) {
     const root = source.querySelector(':scope > ul > li');
@@ -35,7 +35,7 @@ export function enhanceMindmaps(preview) {
         const ranges = children.map(child => child.range).filter(Boolean);
         if (ranges.length) entry.range = { start: Math.min(...ranges.map(range => range.start)), end: Math.max(...ranges.map(range => range.end)), approximate: ranges.length !== children.length || ranges.some(range => range.approximate), coverage: true };
       } else if (!entry.range) {
-        const timestamp = item.querySelector(':scope > figure > figcaption')?.textContent.trim();
+        const timestamp = item.querySelector(':scope > figure > figcaption')?.textContent.trim() || (item.dataset.time ? format(Number(item.dataset.time)) : '');
         if (/^\d+:\d{2}:\d{2}$/.test(timestamp || '')) {
           const time = toSeconds(timestamp);
           const segment = segments.find(segment => time >= Math.floor(segment.start) && time <= segment.end);
@@ -56,8 +56,9 @@ export function enhanceMindmaps(preview) {
     toolbar.className = 'mindmap-toolbar';
     const canvas = document.createElement('div');
     canvas.className = 'mindmap-canvas';
+    const mediaKind = source.dataset.mediaKind || 'video';
     const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-    svg.setAttribute('aria-label', '视频思维导图');
+    svg.setAttribute('aria-label', `${mediaKind === 'audio' ? '音频' : '视频'}思维导图`);
     canvas.append(svg);
     const detail = document.createElement('div');
     detail.className = 'mindmap-detail';
@@ -100,7 +101,7 @@ export function enhanceMindmaps(preview) {
       const target = event.target.closest('[data-node]');
       if (!target) return;
       const entry = entries.get(target.dataset.node);
-      if (target.dataset.seek && entry.range) seekVideo(entry.range.start);
+      if (target.dataset.seek && entry.range) seekMedia(entry.range.start);
       detail.replaceChildren();
       const heading = document.createElement('strong');
       heading.textContent = entry.label;
@@ -110,7 +111,7 @@ export function enhanceMindmaps(preview) {
       detail.append(rangeLabel);
       const figure = entry.item.querySelector(':scope > figure');
       if (figure) detail.append(figure.cloneNode(true));
-      const video = preview.querySelector('video');
+      const media = preview.querySelector('video, audio');
       if (entry.range) {
         const { start, end } = entry.range;
         const transcript = segments.filter(segment => segment.start <= end && segment.end >= start);
@@ -119,11 +120,11 @@ export function enhanceMindmaps(preview) {
           excerpt.textContent = transcript.map(segment => segment.text).join('\n');
           detail.append(excerpt);
         }
-        if (video) {
+        if (media) {
         const jump = document.createElement('button');
         jump.type = 'button';
         jump.textContent = `跳转到 ${format(start)}`;
-        jump.onclick = () => seekVideo(start);
+        jump.onclick = () => seekMedia(start);
         detail.append(jump);
         }
       }
