@@ -4,7 +4,7 @@ import { createReadStream } from 'node:fs';
 import path from 'node:path';
 import { ZipFile } from 'yazl';
 import { answerNotes } from './ai.mjs';
-import { checkUrl, extractVideoUrls, runVideoJob, mediaTitleFromUrl } from './video.mjs';
+import { checkUrl, extractVideoUrls, runVideoJob, mediaTitleFromUrl, MediaUrlError } from './video.mjs';
 
 const digest = value => createHash('sha256').update(value).digest('hex');
 const fail = (status, message) => { throw Object.assign(new Error(message), { status }); };
@@ -311,7 +311,11 @@ export async function createNotes({ dataDir, token }) {
           const input = await jsonBody(request);
           const urls = input.urls ?? extractVideoUrls(parent.markdown);
           if (!Array.isArray(urls) || !urls.length || urls.length > 30 || urls.some(url => typeof url !== 'string')) fail(400, '需要 1-30 个音频/视频 URL');
-          try { for (const url of urls) await checkUrl(url); } catch { fail(400, '音频/视频 URL 无效或指向内网、保留地址'); }
+          try { for (const url of urls) await checkUrl(url); }
+          catch (error) {
+            if (error instanceof MediaUrlError) fail(error.status, error.message);
+            fail(500, '音频/视频 URL 校验失败，请稍后重试或联系管理员');
+          }
           const jobs = await mutate(database => {
             getNote(database, parentId);
             if (database.videoJobs.filter(job => !['completed', 'failed'].includes(job.status)).length + urls.length > 30) fail(429, '最多同时排队 30 个视频');

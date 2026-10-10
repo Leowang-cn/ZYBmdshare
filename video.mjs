@@ -31,17 +31,33 @@ export const isPrivateAddress = address => {
   if (family !== 6 || address.includes('%')) return true;
   return !globalIpv6.check(address, 'ipv6') || blockedAddresses.check(address, 'ipv6');
 };
+export class MediaUrlError extends Error {
+  constructor(message, code, status = 400) {
+    super(message);
+    this.name = 'MediaUrlError';
+    this.code = code;
+    this.status = status;
+  }
+}
 const publicHost = async hostname => {
-  if (hostname === 'localhost' || hostname.endsWith('.localhost') || hostname.endsWith('.local')) throw new Error('视频 URL 不允许访问本机地址');
-  const records = await dns.lookup(hostname, { all: true, verbatim: true });
-  if (!records.length || records.some(({ address }) => isPrivateAddress(address))) throw new Error('视频 URL 不允许访问内网或保留地址');
+  if (hostname === 'localhost' || hostname.endsWith('.localhost') || hostname.endsWith('.local')) throw new MediaUrlError('音频/视频 URL 不允许访问本机地址，请使用公网地址', 'MEDIA_URL_PRIVATE_ADDRESS');
+  let records;
+  try {
+    records = await dns.lookup(hostname, { all: true, verbatim: true });
+    if (!records.length) throw Object.assign(new Error(), { code: 'ENODATA' });
+  } catch (error) {
+    const code = typeof error?.code === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(error.code) ? error.code : 'UNKNOWN';
+    throw new MediaUrlError(`音频/视频 URL DNS 解析失败（${code}，主机：${hostname}）；请检查服务端 DNS 和网络，稍后重试`, 'MEDIA_URL_DNS_LOOKUP_FAILED', code === 'EAI_AGAIN' ? 503 : 502);
+  }
+  if (records.some(({ address }) => isPrivateAddress(address))) throw new MediaUrlError('音频/视频 URL 不允许访问内网或保留地址（包括混合公网/内网 DNS 结果），请使用仅解析到公网的地址', 'MEDIA_URL_PRIVATE_ADDRESS');
   return records[0];
 };
 export const checkUrl = async value => {
   let url;
-  try { url = new URL(value); } catch { throw new Error('视频 URL 无效'); }
-  if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) throw new Error('视频 URL 必须是无认证的 HTTP(S) 地址');
-  if (value.length > 4096) throw new Error('视频 URL 过长');
+  if (typeof value !== 'string') throw new MediaUrlError('音频/视频 URL 无效，请提供有效的 HTTP(S) 地址', 'MEDIA_URL_INVALID');
+  try { url = new URL(value); } catch { throw new MediaUrlError('音频/视频 URL 无效，请提供有效的 HTTP(S) 地址', 'MEDIA_URL_INVALID'); }
+  if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) throw new MediaUrlError('音频/视频 URL 必须是无认证的 HTTP(S) 地址', 'MEDIA_URL_INVALID');
+  if (value.length > 4096) throw new MediaUrlError('音频/视频 URL 过长（最多 4096 字符）', 'MEDIA_URL_INVALID');
   const address = await publicHost(url.hostname.replace(/^\[|\]$/g, ''));
   return { url, address };
 };
