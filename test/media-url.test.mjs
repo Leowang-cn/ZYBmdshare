@@ -7,10 +7,77 @@ import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { checkUrl, MediaUrlError } from '../video.mjs';
 import { createNotes } from '../notes.mjs';
+import http from 'node:http';
+import { EventEmitter } from 'node:events';
+import { spawnSync } from 'node:child_process';
+import { parseMediaPrivateHostAllowlist } from '../video.mjs';
 
 const hostname = 'zyb-nt-resource-1253445850.cos.ap-beijing.myqcloud.com';
 const mediaUrl = `https://${hostname}/0leoshare/1009%20%E8%AF%BE%E7%A8%8B%E5%88%B6%E4%BD%9C/%E6%9D%8E%E6%B4%81%E9%9F%B3%E9%A2%91.mp3`;
 const signedUrl = `${mediaUrl}?signature=secret-test-signature`;
+
+test('private media DNS exceptions require exact hostname and every private answer', async context => {
+  const previous = process.env.MEDIA_PRIVATE_HOST_ALLOWLIST;
+  process.env.MEDIA_PRIVATE_HOST_ALLOWLIST = JSON.stringify({ [hostname]: ['10.118.35.11'] });
+  let configured;
+  try { configured = await import(`../video.mjs?allowlist=${randomUUID()}`); }
+  finally {
+    if (previous === undefined) delete process.env.MEDIA_PRIVATE_HOST_ALLOWLIST;
+    else process.env.MEDIA_PRIVATE_HOST_ALLOWLIST = previous;
+  }
+  const allowed = { address: '10.118.35.11', family: 4 };
+  const publicRecord = { address: '61.179.133.117', family: 4 };
+  const denied = { address: '10.118.35.12', family: 4 };
+  let records = [allowed];
+  context.mock.method(dns, 'lookup', async () => records);
+  const rejectsPrivate = promise => assert.rejects(promise, error => error.code === 'MEDIA_URL_PRIVATE_ADDRESS' && error.status === 400);
+  await rejectsPrivate(checkUrl(mediaUrl));
+  assert.deepEqual((await configured.checkUrl(mediaUrl)).address, allowed);
+  for (const host of ['other.example.com', `sub.${hostname}`, `${hostname}.`, '10.118.35.11', '[::1]', '0x0a76230b']) {
+    await rejectsPrivate(configured.checkUrl(`http://${host}/audio.mp3`));
+  }
+  for (const answers of [[denied], [allowed, denied], [denied, allowed], [publicRecord, allowed, denied]]) {
+    records = answers;
+    await rejectsPrivate(configured.checkUrl(mediaUrl));
+  }
+  for (const answers of [[allowed, publicRecord], [publicRecord, allowed]]) {
+    records = answers;
+    assert.deepEqual((await configured.checkUrl(mediaUrl)).address, answers[0]);
+  }
+  records = [allowed];
+  let requests = 0;
+  context.mock.method(http, 'get', (url, options, callback) => {
+    requests += 1;
+    assert.equal(url.hostname, hostname);
+    options.lookup(hostname, { all: true }, (error, addresses) => {
+      assert.equal(error, null);
+      assert.deepEqual(addresses, [allowed]);
+    });
+    options.lookup(hostname, {}, (error, address, family) => {
+      assert.equal(error, null);
+      assert.equal(address, allowed.address);
+      assert.equal(family, 4);
+    });
+    callback({ statusCode: 302, headers: { location: 'http://other.example.com/audio.mp3' }, destroy() {} });
+    return new EventEmitter();
+  });
+  await rejectsPrivate(configured.download(`http://${hostname}/audio.mp3`, path.resolve('.unused-media-download')));
+  assert.equal(requests, 1);
+});
+
+test('private media DNS exception configuration fails clearly at startup', () => {
+  assert.equal(parseMediaPrivateHostAllowlist().size, 0);
+  assert.equal(parseMediaPrivateHostAllowlist(JSON.stringify({ [hostname]: ['10.118.35.11'] })).get(hostname).has('10.118.35.11'), true);
+  const invalid = ['not-json', '', 'null', '[]', '42', '"text"'];
+  for (const key of ['10.118.35.11', '[::1]', '127.1', '0x7f.1', 'localhost', 'test.local', 'test.localhost', '*.example.com', 'https://example.com', 'EXAMPLE.com', 'example.com.', '-bad.example.com', 'bad_label.example.com']) invalid.push(JSON.stringify({ [key]: ['10.118.35.11'] }));
+  for (const addresses of [null, {}, [], '10.118.35.11', [42], [''], ['bad'], ['10.118.35.0/24'], [' 10.118.35.11'], ['8.8.8.8'], ['fe80::1%eth0']]) invalid.push(JSON.stringify({ [hostname]: addresses }));
+  for (const value of invalid) assert.throws(() => parseMediaPrivateHostAllowlist(value), /Invalid MEDIA_PRIVATE_HOST_ALLOWLIST:/);
+  const result = spawnSync(process.execPath, ['--input-type=module', '-e', 'await import("./video.mjs")'], {
+    cwd: path.resolve('.'), env: { ...process.env, MEDIA_PRIVATE_HOST_ALLOWLIST: '{' }, encoding: 'utf8'
+  });
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /Invalid MEDIA_PRIVATE_HOST_ALLOWLIST: expected a JSON object/);
+});
 
 test('media URL validation distinguishes DNS errors without leaking signed URLs', async context => {
   for (const code of ['ENOTFOUND', 'EAI_AGAIN', 'ENODATA', undefined, 'secret-test-signature']) {

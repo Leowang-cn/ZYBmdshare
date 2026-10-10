@@ -31,6 +31,27 @@ export const isPrivateAddress = address => {
   if (family !== 6 || address.includes('%')) return true;
   return !globalIpv6.check(address, 'ipv6') || blockedAddresses.check(address, 'ipv6');
 };
+export function parseMediaPrivateHostAllowlist(value = '{}') {
+  const invalid = reason => { throw new Error(`Invalid MEDIA_PRIVATE_HOST_ALLOWLIST: ${reason}`); };
+  let entries;
+  try { entries = JSON.parse(value); } catch { invalid('expected a JSON object mapping exact hostnames to IP address arrays'); }
+  if (!entries || typeof entries !== 'object' || Array.isArray(entries)) invalid('expected a JSON object');
+  const allowlist = new Map();
+  for (const [hostname, addresses] of Object.entries(entries)) {
+    if (hostname.length > 253 || !hostname.includes('.') || !hostname.split('.').every(label => /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(label)) || isIP(hostname) || hostname.endsWith('.localhost') || hostname.endsWith('.local')) invalid('keys must be exact lowercase DNS hostnames, not IP literals, URLs or wildcards');
+    // URL parsing also catches non-standard numeric IP spellings such as 127.1.
+    let parsedHostname;
+    try { parsedHostname = new URL(`http://${hostname}`).hostname; } catch { invalid('invalid DNS hostname'); }
+    if (parsedHostname !== hostname) invalid('IP literal hostname keys are not allowed');
+    if (!Array.isArray(addresses) || !addresses.length) invalid('each hostname must map to a non-empty IP address array');
+    for (const address of addresses) {
+      if (typeof address !== 'string' || !isIP(address) || address.includes('%') || !isPrivateAddress(address)) invalid('addresses must be exact private/reserved IP literals, not public addresses or CIDRs');
+    }
+    allowlist.set(hostname, new Set(addresses));
+  }
+  return allowlist;
+}
+const mediaPrivateHostAllowlist = parseMediaPrivateHostAllowlist(process.env.MEDIA_PRIVATE_HOST_ALLOWLIST);
 export class MediaUrlError extends Error {
   constructor(message, code, status = 400) {
     super(message);
@@ -41,6 +62,7 @@ export class MediaUrlError extends Error {
 }
 const publicHost = async hostname => {
   if (hostname === 'localhost' || hostname.endsWith('.localhost') || hostname.endsWith('.local')) throw new MediaUrlError('音频/视频 URL 不允许访问本机地址，请使用公网地址', 'MEDIA_URL_PRIVATE_ADDRESS');
+  if (isIP(hostname) && isPrivateAddress(hostname)) throw new MediaUrlError('音频/视频 URL 不允许访问内网或保留地址，请使用公网地址', 'MEDIA_URL_PRIVATE_ADDRESS');
   let records;
   try {
     records = await dns.lookup(hostname, { all: true, verbatim: true });
@@ -49,7 +71,7 @@ const publicHost = async hostname => {
     const code = typeof error?.code === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(error.code) ? error.code : 'UNKNOWN';
     throw new MediaUrlError(`音频/视频 URL DNS 解析失败（${code}，主机：${hostname}）；请检查服务端 DNS 和网络，稍后重试`, 'MEDIA_URL_DNS_LOOKUP_FAILED', code === 'EAI_AGAIN' ? 503 : 502);
   }
-  if (records.some(({ address }) => isPrivateAddress(address))) throw new MediaUrlError('音频/视频 URL 不允许访问内网或保留地址（包括混合公网/内网 DNS 结果），请使用仅解析到公网的地址', 'MEDIA_URL_PRIVATE_ADDRESS');
+  if (records.some(({ address }) => isPrivateAddress(address) && !mediaPrivateHostAllowlist.get(hostname)?.has(address))) throw new MediaUrlError('音频/视频 URL 不允许访问内网或保留地址（包括混合公网/内网 DNS 结果），请使用仅解析到公网的地址', 'MEDIA_URL_PRIVATE_ADDRESS');
   return records[0];
 };
 export const checkUrl = async value => {
